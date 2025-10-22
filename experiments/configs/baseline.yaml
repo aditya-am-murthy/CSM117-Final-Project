@@ -1,0 +1,42 @@
+# Baseline Experiment config
+experiment_name: "baseline_cifar10"
+experiment_id: ""
+description: "Baseline federated learning with gradient negation unlearning on CIFAR-10"
+
+# Dataset config
+dataset_name: "cifar10"
+data_dir: "./data"
+num_clients: 10
+data_distribution: "iid"
+non_iid_alpha: 0.5
+
+# Model config
+model_name: "simple_cnn"
+num_classes: 10
+
+# Federated learning config
+num_rounds: 50
+local_epochs: 3
+batch_size: 32
+learning_rate: 0.01
+aggregation_method: "fedavg"
+
+# Unlearning config
+unlearning_strategy: "gradient_negation"
+forget_ratio: 0.1
+test_ratio: 0.2
+unlearning_epochs: 5
+
+# Evaluation config
+evaluation_metrics:
+  - "accuracy"
+  - "precision"
+  - "recall"
+  - "f1_score"
+
+# Logging and tracking
+use_wandb: false
+wandb_project: "fl-unlearning"
+log_level: "INFO"
+save_results: true
+results_dir: "./results"
