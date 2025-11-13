@@ -1,0 +1,23 @@
+{
+  "experiment_name": "mini_batch_forgetting_gradient_replay",
+  "description": "Mini-batch forgetting with gradient replay buffers",
+  "dataset_name": "cifar10",
+  "data_dir": "./data",
+  "model_name": "google/vit-base-patch16-224",
+  "use_vit": true,
+  "num_classes": 10,
+  "batch_size": 32,
+  "learning_rate": 0.0001,
+  "device": "cuda",
+  "unlearning_strategy": "gradient_replay",
+  "forget_ratio": 0.1,
+  "test_ratio": 0.2,
+  "training_epochs": 5,
+  "buffer_size": 100,
+  "replay_weight": 0.5,
+  "adaptive_threshold": 0.1,
+  "unlearning_epochs": 10,
+  "wandb_project": "unlearning-experiments",
+  "results_dir": "./results"
+}
+

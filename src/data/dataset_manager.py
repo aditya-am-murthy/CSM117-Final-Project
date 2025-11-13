@@ -18,27 +18,44 @@ from collections import defaultdict
 class DatasetManager:
     """Manages dataset loading and distribution for FL experiments."""
     
-    def __init__(self, dataset_name: str = "cifar10", data_dir: str = "./data"):
+    def __init__(self, dataset_name: str = "cifar10", data_dir: str = "./data", use_vit: bool = False):
         self.dataset_name = dataset_name
         self.data_dir = data_dir
+        self.use_vit = use_vit
         self.transform_train = None
         self.transform_test = None
-        self._setup_transforms()
+        self._setup_transforms(use_vit=use_vit)
     
-    def _setup_transforms(self):
+    def _setup_transforms(self, use_vit: bool = False):
         """Setup data transforms for training and testing."""
         if self.dataset_name.lower() == "cifar10":
-            self.transform_train = transforms.Compose([
-                transforms.RandomCrop(32, padding=4),
-                transforms.RandomHorizontalFlip(),
-                transforms.ToTensor(),
-                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-            ])
-            
-            self.transform_test = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-            ])
+            if use_vit:
+                # ViT requires 224x224 images
+                self.transform_train = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.RandomCrop(224, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+                ])
+                
+                self.transform_test = transforms.Compose([
+                    transforms.Resize((224, 224)),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+                ])
+            else:
+                self.transform_train = transforms.Compose([
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+                ])
+                
+                self.transform_test = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+                ])
         else:
             self.transform_train = transforms.Compose([
                 transforms.ToTensor(),
