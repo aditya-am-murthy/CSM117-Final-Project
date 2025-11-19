@@ -12,9 +12,12 @@ import os
 import sys
 import json
 import argparse
+import random
+import itertools
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -36,6 +39,185 @@ from src.unlearning.experiments.pareto_optimization import (
     ParetoOptimizationUnlearning
 )
 from src.fl.base import FLConfig
+
+
+def _assign_default_experiment_id(config: Dict[str, Any]):
+    """Fallback experiment_id assignment."""
+    if 'experiment_id' not in config:
+        prefix = config.get('experiment_name') or config.get('unlearning_strategy') or 'experiment'
+        config['experiment_id'] = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+
+def _format_value_for_id(value: Any) -> str:
+    """Utility to create filesystem-safe value strings."""
+    if isinstance(value, float):
+        return f"{value:.3f}".rstrip('0').rstrip('.').replace('.', 'p')
+    return str(value).replace(' ', '_')
+
+
+def _ensure_experiment_identity(config: Dict[str, Any],
+                                base_name: str,
+                                entry_name: str,
+                                combo_details: Optional[Dict[str, Any]],
+                                index: int) -> Dict[str, Any]:
+    """Populate experiment_name and experiment_id if absent."""
+    if 'experiment_name' not in config:
+        suffix = entry_name or f"group_{index}"
+        config['experiment_name'] = f"{base_name}_{suffix}"
+    
+    if 'experiment_id' not in config:
+        parts = [config['experiment_name']]
+        if combo_details:
+            combo_segment = "_".join(
+                f"{key}-{_format_value_for_id(value)}"
+                for key, value in combo_details.items()
+            )
+            if combo_segment:
+                parts.append(combo_segment)
+        else:
+            parts.append(f"run{index:03d}")
+        config['experiment_id'] = "_".join(parts)
+    
+    return config
+
+
+def _expand_experiment_suite(config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Expand experiment suites into individual experiment configs."""
+    suite_entries = config.get('experiment_suite')
+    if not suite_entries:
+        return [config]
+    
+    base_config = {k: v for k, v in config.items() if k != 'experiment_suite'}
+    base_name = base_config.get('experiment_name', 'experiment')
+    expanded_configs: List[Dict[str, Any]] = []
+    
+    for entry_idx, entry in enumerate(suite_entries):
+        entry_base = copy.deepcopy(base_config)
+        overrides = entry.get('overrides', {})
+        entry_base.update(overrides)
+        entry_name = entry.get('name', f"group_{entry_idx}")
+        parameter_grid = entry.get('parameter_grid')
+        manual_experiments = entry.get('experiments')
+        
+        if manual_experiments:
+            for manual_idx, manual in enumerate(manual_experiments):
+                final_config = copy.deepcopy(entry_base)
+                final_config.update(manual)
+                final_config = _ensure_experiment_identity(
+                    final_config, base_name, entry_name, None, manual_idx
+                )
+                expanded_configs.append(final_config)
+            continue
+        
+        if parameter_grid:
+            grid_items = sorted(parameter_grid.items())
+            grid_keys = [item[0] for item in grid_items]
+            grid_values = [item[1] for item in grid_items]
+            
+            for combo_idx, combo in enumerate(itertools.product(*grid_values)):
+                combo_dict = {key: value for key, value in zip(grid_keys, combo)}
+                final_config = copy.deepcopy(entry_base)
+                final_config.update(combo_dict)
+                final_config = _ensure_experiment_identity(
+                    final_config, base_name, entry_name, combo_dict, combo_idx
+                )
+                expanded_configs.append(final_config)
+            continue
+        
+        # Fallback: treat entry as direct overrides
+        final_config = copy.deepcopy(entry_base)
+        for key, value in entry.items():
+            if key in {'name', 'overrides', 'parameter_grid', 'experiments'}:
+                continue
+            final_config[key] = value
+        
+        final_config = _ensure_experiment_identity(
+            final_config, base_name, entry_name, None, entry_idx
+        )
+        expanded_configs.append(final_config)
+    
+    return expanded_configs
+
+
+def _save_suite_summary(original_config: Dict[str, Any],
+                        suite_results: List[Dict[str, Any]]):
+    """Persist aggregated suite results to disk."""
+    if not suite_results:
+        return
+    
+    suite_name = original_config.get('suite_name') or original_config.get('experiment_name', 'suite')
+    results_dir = Path(original_config.get('results_dir', './results'))
+    suite_dir = results_dir / f"{suite_name}_suite"
+    suite_dir.mkdir(parents=True, exist_ok=True)
+    
+    summary_payload = []
+    for entry in suite_results:
+        config_snapshot = entry['config']
+        result = entry['results']
+        summary_payload.append({
+            'experiment_id': config_snapshot.get('experiment_id'),
+            'experiment_name': config_snapshot.get('experiment_name'),
+            'unlearning_strategy': config_snapshot.get('unlearning_strategy'),
+            'forget_ratio': config_snapshot.get('forget_ratio'),
+            'pruning_ratio': config_snapshot.get('pruning_ratio'),
+            'buffer_size': config_snapshot.get('buffer_size'),
+            'forget_weight': config_snapshot.get('forget_weight'),
+            'retention_weight': config_snapshot.get('retention_weight'),
+            'seed': config_snapshot.get('seed'),
+            'metrics': result.get('unlearning_effectiveness', {}),
+            'original_metrics': result.get('original_metrics', {}),
+            'gold_standard_metrics': result.get('gold_standard_metrics', {}),
+            'unlearned_metrics': result.get('unlearned_metrics', {})
+        })
+    
+    with open(suite_dir / "suite_summary.json", 'w') as f:
+        json.dump(summary_payload, f, indent=2, default=str)
+
+
+def _print_suite_table(suite_results: List[Dict[str, Any]]):
+    """Pretty print suite results to stdout."""
+    if not suite_results:
+        return
+    
+    print("\n" + "=" * 70)
+    print("SUITE SUMMARY")
+    print("=" * 70)
+    header = f"{'Experiment ID':<45} {'Forget':>8} {'Retain':>8} {'Test':>8}"
+    print(header)
+    print("-" * len(header))
+    
+    for entry in suite_results:
+        config_snapshot = entry['config']
+        result = entry['results']
+        unlearned_metrics = result.get('unlearned_metrics', {})
+        forget_acc = unlearned_metrics.get('forget', {}).get('accuracy', 0.0)
+        retain_acc = unlearned_metrics.get('retain', {}).get('accuracy', 0.0)
+        test_acc = unlearned_metrics.get('test', {}).get('accuracy', 0.0)
+        print(f"{config_snapshot.get('experiment_id', 'unknown'):<45} "
+              f"{forget_acc:>8.3f} {retain_acc:>8.3f} {test_acc:>8.3f}")
+    
+    print("=" * 70 + "\n")
+
+
+def _print_single_summary(results: Dict[str, Any]):
+    """Pretty print a single-experiment summary."""
+    print("\n" + "=" * 60)
+    print("EXPERIMENT SUMMARY")
+    print("=" * 60)
+    print(f"Original Model (trained on all data):")
+    print(f"  Test Accuracy: {results['original_metrics']['test']['accuracy']:.4f}")
+    print(f"\nGold Standard Model (trained WITHOUT forget data):")
+    print(f"  Test Accuracy: {results['gold_standard_metrics']['test']['accuracy']:.4f}")
+    print(f"\nUnlearned Model:")
+    print(f"  Test Accuracy: {results['unlearned_metrics']['test']['accuracy']:.4f}")
+    print(f"\nUnlearning Effectiveness:")
+    print(f"  Forget Effectiveness: {results['unlearning_effectiveness']['forget_effectiveness']:.4f}")
+    print(f"  Retention Preservation: {results['unlearning_effectiveness']['retention_preservation']:.4f}")
+    print(f"  Generalization Preservation: {results['unlearning_effectiveness']['generalization_preservation']:.4f}")
+    print(f"\nComparison to Gold Standard:")
+    print(f"  Test Accuracy Gap: {results['unlearning_effectiveness']['test_gap_to_gold_standard']:.4f}")
+    print("=" * 60 + "\n")
 
 
 class ExperimentLogger:
@@ -82,11 +264,15 @@ class UnlearningExperimentRunner:
     def __init__(self, config: Dict[str, Any], use_wandb: bool = True):
         self.config = config
         self.use_wandb = use_wandb
+        self._set_seed(self.config.get('seed'))
         self.device = torch.device(config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
+        self.verbose = self.config.get('verbose', False)
+        self.log_interval = self.config.get('log_interval', 10)
         
         # Setup logging
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.DEBUG if self.verbose else logging.INFO)
         self.logger = logging.getLogger(__name__)
+        self.logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
         
         # Create experiment logger
         experiment_id = config.get('experiment_id', f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -111,6 +297,24 @@ class UnlearningExperimentRunner:
         
         # Setup evaluator
         self.evaluator = UnlearningEvaluator(device=str(self.device))
+        self._log_verbose(f"Initialized runner with config: {json.dumps(self.config, indent=2, default=str)}")
+    
+    def _set_seed(self, seed: Optional[int]):
+        """Ensure determinism across frameworks."""
+        if seed is None:
+            return
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    
+    def _log_verbose(self, message: str):
+        """Helper to emit debug logs only when verbose is enabled."""
+        if self.verbose:
+            self.logger.debug(message)
     
     def load_model(self) -> nn.Module:
         """Load the model based on configuration."""
@@ -168,18 +372,20 @@ class UnlearningExperimentRunner:
         else:
             raise ValueError(f"Unknown unlearning strategy: {strategy_type}")
     
-    def train_model(self, model: nn.Module, train_loader: DataLoader, epochs: int = 5) -> nn.Module:
+    def train_model(self, model: nn.Module, train_loader: DataLoader, epochs: int = 5,
+                    phase_name: str = "train") -> nn.Module:
         """Train the model on the training data."""
         model.train()
         optimizer = torch.optim.Adam(model.parameters(), lr=self.config.get('learning_rate', 0.0001))
         criterion = nn.CrossEntropyLoss()
+        total_batches = len(train_loader)
         
         self.logger.info(f"Training model for {epochs} epochs...")
         for epoch in range(epochs):
             epoch_loss = 0.0
             num_batches = 0
             
-            for data, target in train_loader:
+            for batch_idx, (data, target) in enumerate(train_loader):
                 data = data.to(self.device)
                 target = target.to(self.device)
                 
@@ -191,6 +397,13 @@ class UnlearningExperimentRunner:
                 
                 epoch_loss += loss.item()
                 num_batches += 1
+                
+                if self.verbose and (self.log_interval > 0):
+                    if ((batch_idx + 1) % self.log_interval == 0) or (batch_idx + 1 == total_batches):
+                        self.logger.debug(
+                            f"[{phase_name}] Epoch {epoch+1}/{epochs} "
+                            f"Batch {batch_idx+1}/{total_batches} Loss: {loss.item():.4f}"
+                        )
             
             avg_loss = epoch_loss / max(num_batches, 1)
             self.logger.info(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
@@ -211,13 +424,24 @@ class UnlearningExperimentRunner:
         # Prepare data splits BEFORE training
         self.logger.info("Preparing data splits...")
         train_dataset, test_dataset = self.dataset_manager.load_dataset()
+        self._log_verbose(f"Loaded datasets -> train: {len(train_dataset)} samples, test: {len(test_dataset)} samples")
         
         # Split training data into forget and retain BEFORE training
         forget_ratio = self.config.get('forget_ratio', 0.1)
         test_ratio = self.config.get('test_ratio', 0.2)
         
+        split_seed = self.config.get('split_seed', self.config.get('seed'))
         forget_loader, retain_loader, _ = UnlearningDataSplitter.split_for_unlearning(
-            train_dataset, forget_ratio, test_ratio
+            train_dataset,
+            forget_ratio,
+            test_ratio,
+            batch_size=self.config.get('batch_size', 32),
+            seed=split_seed,
+            stratified=self.config.get('stratified_split', True)
+        )
+        self._log_verbose(
+            f"Split sizes -> forget: {len(forget_loader.dataset)}, retain: {len(retain_loader.dataset)}, "
+            f"test: {len(test_dataset)}, seed: {split_seed}, stratified: {self.config.get('stratified_split', True)}"
         )
         
         # Create combined training loader (forget + retain) for initial training
@@ -242,7 +466,8 @@ class UnlearningExperimentRunner:
         original_model = self.train_model(
             copy.deepcopy(base_model),
             combined_loader,
-            epochs=training_epochs
+            epochs=training_epochs,
+            phase_name="original"
         )
         
         # Also train a "gold standard" model WITHOUT forget data (for comparison)
@@ -250,7 +475,8 @@ class UnlearningExperimentRunner:
         gold_standard_model = self.train_model(
             copy.deepcopy(base_model),
             retain_loader,
-            epochs=training_epochs
+            epochs=training_epochs,
+            phase_name="gold_standard"
         )
         
         # Evaluate original model (trained on all data)
@@ -260,6 +486,7 @@ class UnlearningExperimentRunner:
             'retain': self.evaluator.evaluate_model(original_model, retain_loader),
             'test': self.evaluator.evaluate_model(original_model, test_loader)
         }
+        self._log_verbose(f"Original metrics: {json.dumps(original_metrics, indent=2)}")
         
         # Evaluate gold standard model (trained without forget data)
         self.logger.info("Evaluating gold standard model (trained without forget data)...")
@@ -268,6 +495,7 @@ class UnlearningExperimentRunner:
             'retain': self.evaluator.evaluate_model(gold_standard_model, retain_loader),
             'test': self.evaluator.evaluate_model(gold_standard_model, test_loader)
         }
+        self._log_verbose(f"Gold standard metrics: {json.dumps(gold_standard_metrics, indent=2)}")
         
         self.logger.info(f"Original model - Test Accuracy: {original_metrics['test']['accuracy']:.4f}")
         self.logger.info(f"Gold standard model - Test Accuracy: {gold_standard_metrics['test']['accuracy']:.4f}")
@@ -308,11 +536,13 @@ class UnlearningExperimentRunner:
             'retain': self.evaluator.evaluate_model(unlearned_model, retain_loader),
             'test': self.evaluator.evaluate_model(unlearned_model, test_loader)
         }
+        self._log_verbose(f"Unlearned metrics: {json.dumps(unlearned_metrics, indent=2)}")
         
         # Get unlearning strategy evaluation
         strategy_metrics = unlearning_strategy.evaluate_unlearning(
             unlearned_model, forget_loader, retain_loader
         )
+        self._log_verbose(f"Strategy metrics: {json.dumps(strategy_metrics, indent=2)}")
         
         # Compute unlearning effectiveness
         forget_accuracy_drop = original_metrics['forget']['accuracy'] - unlearned_metrics['forget']['accuracy']
@@ -397,6 +627,8 @@ def main():
                        help='Path to experiment configuration JSON file')
     parser.add_argument('--no-wandb', action='store_true',
                        help='Disable wandb logging')
+    parser.add_argument('--verbose', action='store_true',
+                       help='Enable verbose logging for training and evaluation')
     
     args = parser.parse_args()
     
@@ -404,30 +636,30 @@ def main():
     with open(args.config, 'r') as f:
         config = json.load(f)
     
-    # Add experiment ID if not present
-    if 'experiment_id' not in config:
-        config['experiment_id'] = f"{config.get('unlearning_strategy', 'experiment')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    if args.verbose:
+        config['verbose'] = True
     
-    # Run experiment
-    runner = UnlearningExperimentRunner(config, use_wandb=not args.no_wandb)
-    results = runner.run_experiment()
+    wandb_allowed = not args.no_wandb
+    base_wandb_pref = config.get('use_wandb', True)
+    expanded_configs = _expand_experiment_suite(config)
     
-    print("\n" + "="*60)
-    print("EXPERIMENT SUMMARY")
-    print("="*60)
-    print(f"Original Model (trained on all data):")
-    print(f"  Test Accuracy: {results['original_metrics']['test']['accuracy']:.4f}")
-    print(f"\nGold Standard Model (trained WITHOUT forget data):")
-    print(f"  Test Accuracy: {results['gold_standard_metrics']['test']['accuracy']:.4f}")
-    print(f"\nUnlearned Model:")
-    print(f"  Test Accuracy: {results['unlearned_metrics']['test']['accuracy']:.4f}")
-    print(f"\nUnlearning Effectiveness:")
-    print(f"  Forget Effectiveness: {results['unlearning_effectiveness']['forget_effectiveness']:.4f}")
-    print(f"  Retention Preservation: {results['unlearning_effectiveness']['retention_preservation']:.4f}")
-    print(f"  Generalization Preservation: {results['unlearning_effectiveness']['generalization_preservation']:.4f}")
-    print(f"\nComparison to Gold Standard:")
-    print(f"  Test Accuracy Gap: {results['unlearning_effectiveness']['test_gap_to_gold_standard']:.4f}")
-    print("="*60)
+    # Ensure each config has an experiment_id
+    for cfg in expanded_configs:
+        _assign_default_experiment_id(cfg)
+    
+    suite_mode = len(expanded_configs) > 1
+    suite_results: List[Dict[str, Any]] = []
+    
+    for cfg in expanded_configs:
+        cfg_wandb_pref = cfg.get('use_wandb', base_wandb_pref)
+        runner = UnlearningExperimentRunner(cfg, use_wandb=(cfg_wandb_pref and wandb_allowed))
+        results = runner.run_experiment()
+        _print_single_summary(results)
+        suite_results.append({'config': cfg, 'results': results})
+    
+    if suite_mode:
+        _save_suite_summary(config, suite_results)
+        _print_suite_table(suite_results)
 
 
 if __name__ == "__main__":

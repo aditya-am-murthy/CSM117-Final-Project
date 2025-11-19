@@ -1,0 +1,61 @@
+{
+  "experiment_name": "report_experiments",
+  "description": "Ablations for dynamic pruning, gradient replay, and Pareto optimization as described in the project report.",
+  "dataset_name": "cifar10",
+  "data_dir": "./data",
+  "model_name": "google/vit-base-patch16-224",
+  "use_vit": true,
+  "num_classes": 10,
+  "batch_size": 32,
+  "learning_rate": 0.0001,
+  "device": "cuda",
+  "training_epochs": 5,
+  "test_ratio": 0.2,
+  "seed": 42,
+  "split_seed": 42,
+  "stratified_split": true,
+  "wandb_project": "unlearning-experiments",
+  "results_dir": "./results",
+  "suite_name": "report_core",
+  "experiment_suite": [
+    {
+      "name": "dynamic_pruning",
+      "overrides": {
+        "unlearning_strategy": "dynamic_pruning",
+        "importance_threshold": 0.5,
+        "fine_tune_epochs": 5
+      },
+      "parameter_grid": {
+        "forget_ratio": [0.05, 0.1, 0.2, 0.3],
+        "pruning_ratio": [0.1, 0.2, 0.3, 0.4, 0.5]
+      }
+    },
+    {
+      "name": "gradient_replay",
+      "overrides": {
+        "unlearning_strategy": "gradient_replay",
+        "adaptive_threshold": 0.15,
+        "replay_weight": 0.6,
+        "unlearning_epochs": 10
+      },
+      "parameter_grid": {
+        "forget_ratio": [0.05, 0.1, 0.2, 0.3],
+        "buffer_size": [500, 1000, 2500, 5000]
+      }
+    },
+    {
+      "name": "pareto_optimization",
+      "overrides": {
+        "unlearning_strategy": "pareto_optimization",
+        "adaptive_weights": true,
+        "pareto_steps": 25,
+        "unlearning_epochs": 10
+      },
+      "parameter_grid": {
+        "forget_ratio": [0.1, 0.2, 0.3],
+        "forget_weight": [0.1, 0.3, 0.5, 0.7, 0.9]
+      }
+    }
+  ]
+}
+
