@@ -1,2 +1,6 @@
 wandb/*
-data/*
+data/*data/
+wandb/
+*.tar.gz
+__pycache__/
+*.pyc
