@@ -7,7 +7,7 @@ Vision Transformers from HuggingFace.
 
 import torch
 import torch.nn as nn
-from transformers import ViTForImageClassification, ViTFeatureExtractor
+from transformers import ViTForImageClassification, ViTFeatureExtractor, MobileViTForImageClassification
 from typing import Optional, Dict, Any
 import logging
 
@@ -50,40 +50,56 @@ def load_vit_model(model_name: str = "google/vit-base-patch16-224",
                    device: str = "cuda" if torch.cuda.is_available() else "cpu",
                    replace_classifier: bool = True) -> nn.Module:
     """
-    Load a Vision Transformer model from HuggingFace.
+    Load a Vision Transformer or MobileViT model from HuggingFace.
     
     Args:
         model_name: HuggingFace model identifier
-            - Use "google/vit-base-patch16-224" for ImageNet-pretrained (recommended for unlearning)
+            - Use "google/vit-base-patch16-224" for ImageNet-pretrained ViT (recommended for unlearning)
+            - Use "apple/mobilevit-small" for MobileViT-small (faster, smaller model)
             - Use "nateraw/vit-base-patch16-224-cifar10" for CIFAR-10 fine-tuned (not recommended)
         num_classes: Number of output classes (will replace classifier if replace_classifier=True)
         device: Device to load model on
         replace_classifier: If True, replace the final classifier layer with one for num_classes
         
     Returns:
-        Loaded ViT model wrapped for compatibility
+        Loaded model wrapped for compatibility
     """
     try:
-        logger.info(f"Loading ViT model: {model_name}")
-        vit_model = ViTForImageClassification.from_pretrained(model_name)
+        # Check if it's a MobileViT model
+        if "mobilevit" in model_name.lower() or "apple" in model_name.lower():
+            logger.info(f"Loading MobileViT model: {model_name}")
+            model = MobileViTForImageClassification.from_pretrained(model_name)
+        else:
+            logger.info(f"Loading ViT model: {model_name}")
+            model = ViTForImageClassification.from_pretrained(model_name)
         
         # Replace classifier head if needed (e.g., ImageNet has 1000 classes, CIFAR-10 has 10)
-        if replace_classifier and hasattr(vit_model, 'classifier'):
-            original_in_features = vit_model.classifier.in_features
-            vit_model.classifier = nn.Linear(original_in_features, num_classes)
-            logger.info(f"Replaced classifier head: {original_in_features} -> {num_classes} classes")
+        if replace_classifier:
+            # MobileViT uses 'classifier' attribute, ViT also uses 'classifier'
+            if hasattr(model, 'classifier'):
+                if isinstance(model.classifier, nn.Linear):
+                    original_in_features = model.classifier.in_features
+                    model.classifier = nn.Linear(original_in_features, num_classes)
+                    logger.info(f"Replaced classifier head: {original_in_features} -> {num_classes} classes")
+                else:
+                    # Some models might have classifier as a different structure
+                    logger.warning(f"Model classifier is not a simple Linear layer: {type(model.classifier)}")
+            elif hasattr(model, 'config') and hasattr(model.config, 'num_labels'):
+                # Try to find the classifier in the model structure
+                logger.warning(f"Could not find classifier attribute. Model has {model.config.num_labels} classes.")
         
-        vit_model.to(device)
-        vit_model.eval()
+        model.to(device)
+        model.eval()
         
         # Wrap the model for compatibility
-        wrapped_model = ViTWrapper(vit_model)
+        wrapped_model = ViTWrapper(model)
         wrapped_model.to(device)
         
-        logger.info(f"Successfully loaded ViT model on {device}")
+        model_type = "MobileViT" if "mobilevit" in model_name.lower() else "ViT"
+        logger.info(f"Successfully loaded {model_type} model on {device}")
         return wrapped_model
     except Exception as e:
-        logger.error(f"Failed to load ViT model: {e}")
+        logger.error(f"Failed to load model: {e}")
         raise
 
 
@@ -122,13 +138,13 @@ def create_model_from_config(model_name: str, num_classes: int = 10,
     Returns:
         Model instance
     """
-    if "vit" in model_name.lower() or "google" in model_name.lower() or "nateraw" in model_name.lower():
+    if "vit" in model_name.lower() or "google" in model_name.lower() or "nateraw" in model_name.lower() or "mobilevit" in model_name.lower() or "apple" in model_name.lower():
         # For unlearning experiments, we want ImageNet-pretrained, NOT CIFAR-10 fine-tuned
         if "cifar10" in model_name.lower():
             logger.warning(
                 f"Warning: Using model '{model_name}' which was already fine-tuned on CIFAR-10. "
-                "For proper unlearning evaluation, consider using 'google/vit-base-patch16-224' "
-                "which is pretrained on ImageNet but not fine-tuned on CIFAR-10."
+                "For proper unlearning evaluation, consider using 'google/vit-base-patch16-224' or 'apple/mobilevit-small' "
+                "which are pretrained on ImageNet but not fine-tuned on CIFAR-10."
             )
         return load_vit_model(model_name, num_classes, device, replace_classifier=replace_classifier)
     elif model_name.lower() == "resnet18":

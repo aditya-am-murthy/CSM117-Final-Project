@@ -1,0 +1,148 @@
+{
+  "experiment_id": "dynamic_pruning_20251119_010757",
+  "timestamp": "2025-11-19T01:07:57.994048",
+  "config": {
+    "experiment_name": "mini_batch_forgetting_dynamic_pruning",
+    "description": "Mini-batch forgetting with dynamic pruning techniques",
+    "dataset_name": "cifar10",
+    "data_dir": "./data",
+    "model_name": "google/vit-base-patch16-224",
+    "use_vit": true,
+    "num_classes": 10,
+    "batch_size": 32,
+    "learning_rate": 0.0001,
+    "device": "cpu",
+    "unlearning_strategy": "dynamic_pruning",
+    "forget_ratio": 0.1,
+    "test_ratio": 0.2,
+    "training_epochs": 5,
+    "pruning_ratio": 0.1,
+    "importance_threshold": 0.5,
+    "fine_tune_epochs": 5,
+    "wandb_project": "unlearning-experiments",
+    "results_dir": "./results",
+    "experiment_id": "dynamic_pruning_20251119_010757"
+  },
+  "metrics": {
+    "original_forget_accuracy": 0.993,
+    "original_retain_accuracy": 0.9933888888888889,
+    "original_test_accuracy": 0.9697,
+    "gold_standard_forget_accuracy": 0.97475,
+    "gold_standard_retain_accuracy": 0.994,
+    "gold_standard_test_accuracy": 0.9708,
+    "unlearned_forget_accuracy": 0.9995,
+    "unlearned_retain_accuracy": 0.9996666666666667,
+    "unlearned_test_accuracy": 0.98,
+    "forget_accuracy_drop": -0.006500000000000061,
+    "retain_accuracy_drop": -0.0062777777777778265,
+    "test_accuracy_drop": -0.010299999999999976,
+    "forget_effectiveness": -0.006500000000000061,
+    "retention_preservation": 1.0062777777777778,
+    "generalization_preservation": 1.0103,
+    "forget_gap_to_gold_standard": 0.02475000000000005,
+    "retain_gap_to_gold_standard": 0.005666666666666709,
+    "test_gap_to_gold_standard": 0.009199999999999986
+  },
+  "history": [],
+  "final_results": {
+    "original_metrics": {
+      "forget": {
+        "accuracy": 0.993,
+        "precision": 0.9930514565660284,
+        "recall": 0.993,
+        "f1_score": 0.9929945639578264,
+        "loss": 0.020802527378080412,
+        "num_samples": 4000
+      },
+      "retain": {
+        "accuracy": 0.9933888888888889,
+        "precision": 0.9934104086225138,
+        "recall": 0.9933888888888889,
+        "f1_score": 0.9933843155992699,
+        "loss": 0.020308324017898283,
+        "num_samples": 36000
+      },
+      "test": {
+        "accuracy": 0.9697,
+        "precision": 0.9699897664948821,
+        "recall": 0.9697,
+        "f1_score": 0.9696483408636148,
+        "loss": 0.10295373468911617,
+        "num_samples": 10000
+      }
+    },
+    "gold_standard_metrics": {
+      "forget": {
+        "accuracy": 0.97475,
+        "precision": 0.9748743559224899,
+        "recall": 0.97475,
+        "f1_score": 0.9747074667271037,
+        "loss": 0.09270790882315487,
+        "num_samples": 4000
+      },
+      "retain": {
+        "accuracy": 0.994,
+        "precision": 0.9940152754403927,
+        "recall": 0.994,
+        "f1_score": 0.993996717851866,
+        "loss": 0.01760500011406839,
+        "num_samples": 36000
+      },
+      "test": {
+        "accuracy": 0.9708,
+        "precision": 0.9708806330968796,
+        "recall": 0.9708,
+        "f1_score": 0.9707553848320131,
+        "loss": 0.10776795344386315,
+        "num_samples": 10000
+      }
+    },
+    "unlearned_metrics": {
+      "forget": {
+        "accuracy": 0.9995,
+        "precision": 0.9995012035106012,
+        "recall": 0.9995,
+        "f1_score": 0.9994999819554367,
+        "loss": 0.004215832131507341,
+        "num_samples": 4000
+      },
+      "retain": {
+        "accuracy": 0.9996666666666667,
+        "precision": 0.9996668606037302,
+        "recall": 0.9996666666666667,
+        "f1_score": 0.9996666977278283,
+        "loss": 0.0011314577667637625,
+        "num_samples": 36000
+      },
+      "test": {
+        "accuracy": 0.98,
+        "precision": 0.980072374689062,
+        "recall": 0.98,
+        "f1_score": 0.9800151953903141,
+        "loss": 0.0838608133401282,
+        "num_samples": 10000
+      }
+    },
+    "strategy_metrics": {
+      "forget_accuracy": 0.9985,
+      "retain_accuracy": 0.9994166666666666,
+      "forget_loss": 0.007550214841845445,
+      "retain_loss": 0.0013930231864117861,
+      "unlearning_effectiveness": 0.0014999999999999458,
+      "retention_preservation": 0.9994166666666666,
+      "pruning_ratio": 0.1,
+      "num_pruned_params": 85743809.0
+    },
+    "unlearning_effectiveness": {
+      "forget_accuracy_drop": -0.006500000000000061,
+      "retain_accuracy_drop": -0.0062777777777778265,
+      "test_accuracy_drop": -0.010299999999999976,
+      "forget_effectiveness": -0.006500000000000061,
+      "retention_preservation": 1.0062777777777778,
+      "generalization_preservation": 1.0103,
+      "forget_gap_to_gold_standard": 0.02475000000000005,
+      "retain_gap_to_gold_standard": 0.005666666666666709,
+      "test_gap_to_gold_standard": 0.009199999999999986
+    }
+  }
+}
