@@ -305,33 +305,8 @@ class UnlearningDataSplitter:
                 temp_dataset, [forget_size, retain_size], generator=generator
             )
         
-        # Optimize DataLoader with num_workers and pin_memory for faster data loading
-        num_workers = 4  # Parallel data loading
-        pin_memory = torch.cuda.is_available()  # Faster GPU transfer
-        
-        forget_loader = DataLoader(
-            forget_dataset, 
-            batch_size=batch_size, 
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=num_workers > 0
-        )
-        retain_loader = DataLoader(
-            retain_dataset, 
-            batch_size=batch_size, 
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=num_workers > 0
-        )
-        test_loader = DataLoader(
-            test_dataset, 
-            batch_size=batch_size, 
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=num_workers > 0
-        )
+        forget_loader = DataLoader(forget_dataset, batch_size=batch_size, shuffle=True)
+        retain_loader = DataLoader(retain_dataset, batch_size=batch_size, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         
         return forget_loader, retain_loader, test_loader

@@ -24,8 +24,6 @@ from torch.utils.data import DataLoader
 import wandb
 import logging
 import copy
-from tqdm import tqdm
-import time
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent.parent))
@@ -267,69 +265,14 @@ class UnlearningExperimentRunner:
         self.config = config
         self.use_wandb = use_wandb
         self._set_seed(self.config.get('seed'))
-        
-        # Setup logging FIRST (before GPU setup which uses logger)
+        self.device = torch.device(config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
         self.verbose = self.config.get('verbose', False)
         self.log_interval = self.config.get('log_interval', 10)
+        
+        # Setup logging
         logging.basicConfig(level=logging.DEBUG if self.verbose else logging.INFO)
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
-        
-        # Handle multi-GPU setup
-        gpu_ids = config.get('gpu_ids', None)
-        if gpu_ids is not None and isinstance(gpu_ids, list) and len(gpu_ids) > 0:
-            # Check if CUDA_VISIBLE_DEVICES is already set
-            if 'CUDA_VISIBLE_DEVICES' in os.environ:
-                self.logger.warning(f"CUDA_VISIBLE_DEVICES already set to {os.environ['CUDA_VISIBLE_DEVICES']}. "
-                                  f"Requested GPUs {gpu_ids} may not match visible devices.")
-                # Use the already visible devices
-                visible_gpus = os.environ['CUDA_VISIBLE_DEVICES'].split(',')
-                self.gpu_ids = [int(g.strip()) for g in visible_gpus if g.strip()]
-                self.data_parallel_device_ids = list(range(len(self.gpu_ids)))
-                self.use_multi_gpu = len(self.gpu_ids) > 1
-            else:
-                # Try to set CUDA_VISIBLE_DEVICES (may not work if torch already initialized CUDA)
-                # Note: For best results, set CUDA_VISIBLE_DEVICES before running the script
-                try:
-                    os.environ['CUDA_VISIBLE_DEVICES'] = ','.join(map(str, gpu_ids))
-                    self.logger.info(f"Set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
-                    self.logger.warning("Note: CUDA_VISIBLE_DEVICES should be set before importing torch for best results. "
-                                      "If you encounter NCCL errors, try: export CUDA_VISIBLE_DEVICES=1,2,3 before running.")
-                except Exception as e:
-                    self.logger.warning(f"Could not set CUDA_VISIBLE_DEVICES: {e}")
-                
-                self.gpu_ids = gpu_ids
-                # After CUDA_VISIBLE_DEVICES is set, visible devices are remapped to 0, 1, 2...
-                self.data_parallel_device_ids = list(range(len(gpu_ids)))
-                self.use_multi_gpu = len(gpu_ids) > 1
-            
-            # After setting CUDA_VISIBLE_DEVICES, PyTorch will see them as 0, 1, 2, etc.
-            if not torch.cuda.is_available():
-                self.logger.warning("CUDA not available, falling back to CPU")
-                self.device = torch.device('cpu')
-                self.use_multi_gpu = False
-            else:
-                self.device = torch.device('cuda:0')
-                # Verify we can see the expected number of GPUs
-                num_visible_gpus = torch.cuda.device_count()
-                expected_gpus = len(self.gpu_ids) if self.gpu_ids else 1
-                if num_visible_gpus < expected_gpus:
-                    self.logger.warning(f"Only {num_visible_gpus} GPU(s) visible, expected {expected_gpus}. "
-                                      f"Falling back to single GPU.")
-                    self.use_multi_gpu = False
-                    self.data_parallel_device_ids = None
-            
-            # Set NCCL environment variables to help with multi-GPU communication
-            if self.use_multi_gpu:
-                os.environ.setdefault('NCCL_DEBUG', 'WARN')
-                os.environ.setdefault('NCCL_IB_DISABLE', '1')  # Disable InfiniBand if causing issues
-                os.environ.setdefault('NCCL_P2P_DISABLE', '1')  # Disable P2P if causing issues
-        else:
-            # Default behavior
-            self.device = torch.device(config.get('device', 'cuda' if torch.cuda.is_available() else 'cpu'))
-            self.gpu_ids = None
-            self.data_parallel_device_ids = None
-            self.use_multi_gpu = False
         
         # Create experiment logger
         experiment_id = config.get('experiment_id', f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
@@ -338,17 +281,11 @@ class UnlearningExperimentRunner:
         
         # Initialize wandb
         if self.use_wandb:
-            try:
-                wandb.init(
-                    project=config.get('wandb_project', 'unlearning-experiments'),
-                    name=experiment_id,
-                    config=config,
-                    reinit=True
-                )
-                self.logger.info(f"Wandb initialized successfully for experiment: {experiment_id}")
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize wandb: {e}. Continuing without wandb logging.")
-                self.use_wandb = False
+            wandb.init(
+                project=config.get('wandb_project', 'unlearning-experiments'),
+                name=experiment_id,
+                config=config
+            )
         
         # Setup dataset manager
         use_vit = 'vit' in config.get('model_name', '').lower() or config.get('use_vit', False)
@@ -386,54 +323,13 @@ class UnlearningExperimentRunner:
         
         # For unlearning experiments, we want ImageNet-pretrained models, not CIFAR-10 fine-tuned
         # This ensures the model hasn't seen CIFAR-10 before our controlled training
-        if 'vit' in model_name.lower() or 'google' in model_name.lower() or 'nateraw' in model_name.lower() or 'mobilevit' in model_name.lower() or 'apple' in model_name.lower():
+        if 'vit' in model_name.lower() or 'google' in model_name.lower() or 'nateraw' in model_name.lower():
             replace_classifier = self.config.get('replace_classifier', True)
             model = load_vit_model(model_name, num_classes, str(self.device), replace_classifier=replace_classifier)
         else:
             model = create_model_from_config(model_name, num_classes, str(self.device))
         
-        # Move model to device first
-        if torch.cuda.is_available():
-            model = model.to(self.device)
-        
-        # Wrap model with DataParallel if using multiple GPUs (before compilation)
-        if self.use_multi_gpu and torch.cuda.is_available():
-            try:
-                # After CUDA_VISIBLE_DEVICES is set, devices are remapped to 0, 1, 2...
-                model = nn.DataParallel(model, device_ids=self.data_parallel_device_ids)
-                self.logger.info(f"Using DataParallel on physical GPUs {self.gpu_ids} (visible as {self.data_parallel_device_ids})")
-            except Exception as e:
-                self.logger.warning(f"Failed to set up DataParallel: {e}. Falling back to single GPU on {self.device}")
-                self.use_multi_gpu = False
-        
-        # Compile model for faster execution (PyTorch 2.0+) - after DataParallel
-        # Note: torch.compile may not work well with DataParallel, so we skip it in multi-GPU mode
-        if torch.cuda.is_available() and not self.use_multi_gpu:
-            try:
-                if hasattr(torch, 'compile') and self.config.get('compile_model', False):
-                    self.logger.info("Compiling model with torch.compile for faster execution...")
-                    model = torch.compile(model, mode='reduce-overhead')
-                    self.logger.info("Model compilation complete")
-            except Exception as e:
-                self.logger.debug(f"Model compilation not available or failed: {e}. Continuing without compilation.")
-        
         return model
-    
-    def _copy_model(self, model: nn.Module) -> nn.Module:
-        """Copy a model, handling DataParallel wrapper correctly."""
-        if isinstance(model, nn.DataParallel):
-            # Unwrap, copy, and rewrap
-            underlying_model = model.module
-            copied_model = copy.deepcopy(underlying_model)
-            if self.use_multi_gpu and torch.cuda.is_available():
-                copied_model = copied_model.to(self.device)
-                copied_model = nn.DataParallel(copied_model, device_ids=self.data_parallel_device_ids)
-            return copied_model
-        else:
-            copied_model = copy.deepcopy(model)
-            if self.use_multi_gpu and torch.cuda.is_available():
-                copied_model = copied_model.to(self.device)
-            return copied_model
     
     
     def create_unlearning_strategy(self):
@@ -444,7 +340,7 @@ class UnlearningExperimentRunner:
             num_clients=self.config.get('num_clients', 10),
             num_rounds=self.config.get('num_rounds', 100),
             local_epochs=self.config.get('local_epochs', 5),
-            batch_size=self.config.get('batch_size', 16),
+            batch_size=self.config.get('batch_size', 32),
             learning_rate=self.config.get('learning_rate', 0.001),
             device=str(self.device)
         )
@@ -480,265 +376,42 @@ class UnlearningExperimentRunner:
                     phase_name: str = "train") -> nn.Module:
         """Train the model on the training data."""
         model.train()
-        
-        # Enable optimizations for faster training
-        if torch.cuda.is_available():
-            torch.backends.cudnn.benchmark = True  # Faster convolutions
-            # Use mixed precision training for 2x speedup
-            use_amp = self.config.get('use_amp', True)  # Automatic Mixed Precision
-            scaler = torch.cuda.amp.GradScaler() if use_amp else None
-        else:
-            use_amp = False
-            scaler = None
-        
         optimizer = torch.optim.Adam(model.parameters(), lr=self.config.get('learning_rate', 0.0001))
         criterion = nn.CrossEntropyLoss()
         total_batches = len(train_loader)
         
-        self.logger.info(f"Training model for {epochs} epochs ({phase_name} phase)...")
-        
-        # Debug: Log model info
-        if self.verbose:
-            total_params = sum(p.numel() for p in model.parameters())
-            trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-            self.logger.debug(
-                f"Model Info:\n"
-                f"  Total parameters: {total_params:,}\n"
-                f"  Trainable parameters: {trainable_params:,}\n"
-                f"  Device: {self.device}\n"
-                f"  Mixed Precision (AMP): {use_amp}\n"
-                f"  DataLoader workers: {train_loader.num_workers}\n"
-                f"  Batch size: {train_loader.batch_size}\n"
-                f"  Total batches: {total_batches}"
-            )
-        
-        # Global step counter for wandb
-        global_step = 0
-        
-        # Model is already loaded and tested in load_model(), so we can start training immediately
+        self.logger.info(f"Training model for {epochs} epochs...")
         for epoch in range(epochs):
             epoch_loss = 0.0
-            epoch_correct = 0
-            epoch_total = 0
             num_batches = 0
             
-            # Create progress bar for this epoch
-            pbar = tqdm(
-                enumerate(train_loader),
-                total=total_batches,
-                desc=f"{phase_name} Epoch {epoch+1}/{epochs}",
-                leave=True,
-                ncols=100,
-                bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
-            )
-            
-            for batch_idx, (data, target) in pbar:
-                batch_start_time = time.time()
+            for batch_idx, (data, target) in enumerate(train_loader):
+                data = data.to(self.device)
+                target = target.to(self.device)
                 
-                # Time data loading from DataLoader
-                data_loader_start = time.time()
-                # The data is already loaded here, but we can time the iteration
-                data_loader_time = time.time() - data_loader_start
-                
-                # Time data transfer to GPU
-                data_transfer_start = time.time()
-                data = data.to(self.device, non_blocking=True)
-                target = target.to(self.device, non_blocking=True)
-                # Synchronize to ensure transfer is complete
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-                data_transfer_time = time.time() - data_transfer_start
-                
-                # Time optimizer zero_grad
-                zero_grad_start = time.time()
                 optimizer.zero_grad()
-                zero_grad_time = time.time() - zero_grad_start
-                
-                # Time forward pass
-                forward_start = time.time()
-                # Use mixed precision training for faster computation
-                if use_amp and scaler is not None:
-                    with torch.cuda.amp.autocast():
-                        output = model(data)
-                        loss = criterion(output, target)
-                else:
-                    output = model(data)
-                    loss = criterion(output, target)
-                forward_time = time.time() - forward_start
-                
-                # Time backward pass
-                backward_start = time.time()
-                if use_amp and scaler is not None:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
-                backward_time = time.time() - backward_start
-                
-                # Time optimizer step
-                step_start = time.time()
-                if use_amp and scaler is not None:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
-                step_time = time.time() - step_start
-                
-                total_batch_time = time.time() - batch_start_time
-                
-                # Debug timing information (log first batch and every 10th batch)
-                if (batch_idx == 0 or batch_idx % 10 == 0) and self.verbose:
-                    self.logger.debug(
-                        f"[{phase_name}] Batch {batch_idx} Timing Breakdown:\n"
-                        f"  Data Load: {data_load_time*1000:.2f}ms\n"
-                        f"  Zero Grad: {zero_grad_time*1000:.2f}ms\n"
-                        f"  Forward: {forward_time*1000:.2f}ms ({forward_time/total_batch_time*100:.1f}%)\n"
-                        f"  Backward: {backward_time*1000:.2f}ms ({backward_time/total_batch_time*100:.1f}%)\n"
-                        f"  Optimizer Step: {step_time*1000:.2f}ms ({step_time/total_batch_time*100:.1f}%)\n"
-                        f"  Total Batch: {total_batch_time*1000:.2f}ms\n"
-                        f"  Batch Size: {data.size(0)}, Loss: {loss.item():.4f}"
-                    )
-                
-                # Log timing to wandb for first batch and periodically
-                if self.use_wandb and (batch_idx == 0 or batch_idx % 50 == 0):
-                    wandb.log({
-                        f'{phase_name}/timing/data_load_ms': data_load_time * 1000,
-                        f'{phase_name}/timing/zero_grad_ms': zero_grad_time * 1000,
-                        f'{phase_name}/timing/forward_ms': forward_time * 1000,
-                        f'{phase_name}/timing/backward_ms': backward_time * 1000,
-                        f'{phase_name}/timing/optimizer_step_ms': step_time * 1000,
-                        f'{phase_name}/timing/total_batch_ms': total_batch_time * 1000,
-                        f'{phase_name}/timing/batch_idx': batch_idx,
-                        f'{phase_name}/timing/epoch': epoch + 1
-                    })
-                
-                # Calculate batch accuracy
-                predictions = output.argmax(dim=1)
-                batch_correct = (predictions == target).sum().item()
-                batch_total = target.size(0)
-                batch_accuracy = batch_correct / batch_total
+                output = model(data)
+                loss = criterion(output, target)
+                loss.backward()
+                optimizer.step()
                 
                 epoch_loss += loss.item()
-                epoch_correct += batch_correct
-                epoch_total += batch_total
                 num_batches += 1
-                global_step += 1
                 
-                # Update progress bar (update every batch for smooth progress)
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'acc': f'{batch_accuracy:.4f}',
-                    'avg_loss': f'{epoch_loss/num_batches:.4f}',
-                    'avg_acc': f'{epoch_correct/epoch_total:.4f}'
-                }, refresh=True)
-                
-                # Log to wandb at batch level (but only every N batches to avoid I/O bottleneck)
-                wandb_log_interval = self.config.get('wandb_log_interval', 50)  # Log every 50 batches by default
-                if self.use_wandb and (batch_idx % wandb_log_interval == 0 or batch_idx == total_batches - 1):
-                    wandb.log({
-                        f'{phase_name}/batch_loss': loss.item(),
-                        f'{phase_name}/batch_accuracy': batch_accuracy,
-                        f'{phase_name}/learning_rate': optimizer.param_groups[0]['lr'],
-                        f'{phase_name}/epoch': epoch + 1,
-                        f'{phase_name}/global_step': global_step
-                    })
-                
-                # Verbose logging
                 if self.verbose and (self.log_interval > 0):
                     if ((batch_idx + 1) % self.log_interval == 0) or (batch_idx + 1 == total_batches):
                         self.logger.debug(
                             f"[{phase_name}] Epoch {epoch+1}/{epochs} "
-                            f"Batch {batch_idx+1}/{total_batches} "
-                            f"Loss: {loss.item():.4f} Acc: {batch_accuracy:.4f}"
+                            f"Batch {batch_idx+1}/{total_batches} Loss: {loss.item():.4f}"
                         )
             
-            # Close progress bar for this epoch
-            pbar.close()
-            
-            # Calculate epoch metrics
             avg_loss = epoch_loss / max(num_batches, 1)
-            avg_accuracy = epoch_correct / max(epoch_total, 1)
+            self.logger.info(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}")
             
-            self.logger.info(
-                f"[{phase_name}] Epoch {epoch+1}/{epochs} - "
-                f"Loss: {avg_loss:.4f}, Accuracy: {avg_accuracy:.4f}"
-            )
-            
-            # Log epoch-level metrics to wandb
             if self.use_wandb:
-                wandb.log({
-                    f'{phase_name}/epoch_loss': avg_loss,
-                    f'{phase_name}/epoch_accuracy': avg_accuracy,
-                    f'{phase_name}/epoch': epoch + 1
-                })
+                wandb.log({'training/epoch': epoch+1, 'training/loss': avg_loss})
         
         return model
-    
-    def evaluate_model_with_progress(self, model: nn.Module, test_loader: DataLoader, 
-                                     dataset_name: str = "test") -> Dict[str, float]:
-        """Evaluate model with progress bar and wandb logging."""
-        model.eval()
-        all_predictions = []
-        all_targets = []
-        total_loss = 0.0
-        criterion = nn.CrossEntropyLoss()
-        num_batches = len(test_loader)
-        
-        pbar = tqdm(
-            test_loader,
-            desc=f"Evaluating on {dataset_name}",
-            leave=True,
-            ncols=100,
-            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
-        )
-        
-        with torch.no_grad():
-            for batch_idx, (data, target) in enumerate(pbar):
-                data, target = data.to(self.device), target.to(self.device)
-                output = model(data)
-                loss = criterion(output, target)
-                
-                total_loss += loss.item()
-                predictions = output.argmax(dim=1)
-                
-                all_predictions.extend(predictions.cpu().numpy())
-                all_targets.extend(target.cpu().numpy())
-                
-                # Update progress bar
-                batch_accuracy = (predictions == target).sum().item() / target.size(0)
-                pbar.set_postfix({
-                    'loss': f'{loss.item():.4f}',
-                    'acc': f'{batch_accuracy:.4f}'
-                })
-        
-        pbar.close()
-        
-        # Calculate metrics
-        from sklearn.metrics import accuracy_score, precision_recall_fscore_support
-        accuracy = accuracy_score(all_targets, all_predictions)
-        precision, recall, f1, _ = precision_recall_fscore_support(
-            all_targets, all_predictions, average='weighted'
-        )
-        
-        metrics = {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1,
-            'loss': total_loss / num_batches,
-            'num_samples': len(all_targets)
-        }
-        
-        # Log to wandb
-        if self.use_wandb:
-            wandb.log({
-                f'evaluation/{dataset_name}_accuracy': accuracy,
-                f'evaluation/{dataset_name}_precision': precision,
-                f'evaluation/{dataset_name}_recall': recall,
-                f'evaluation/{dataset_name}_f1_score': f1,
-                f'evaluation/{dataset_name}_loss': metrics['loss']
-            })
-        
-        return metrics
     
     def run_experiment(self) -> Dict[str, Any]:
         """Run the complete unlearning experiment."""
@@ -762,7 +435,7 @@ class UnlearningExperimentRunner:
             train_dataset,
             forget_ratio,
             test_ratio,
-            batch_size=self.config.get('batch_size', 16),
+            batch_size=self.config.get('batch_size', 32),
             seed=split_seed,
             stratified=self.config.get('stratified_split', True)
         )
@@ -774,32 +447,24 @@ class UnlearningExperimentRunner:
         # Create combined training loader (forget + retain) for initial training
         from torch.utils.data import ConcatDataset
         combined_dataset = ConcatDataset([forget_loader.dataset, retain_loader.dataset])
-        num_workers = self.config.get('num_workers', 4)  # Parallel data loading
-        pin_memory = torch.cuda.is_available()  # Faster GPU transfer
         combined_loader = DataLoader(
             combined_dataset,
-            batch_size=self.config.get('batch_size', 16),
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=num_workers > 0
+            batch_size=self.config.get('batch_size', 32),
+            shuffle=True
         )
         
         # Create test loader
         test_loader = DataLoader(
             test_dataset,
-            batch_size=self.config.get('batch_size', 16),
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=pin_memory,
-            persistent_workers=num_workers > 0
+            batch_size=self.config.get('batch_size', 32),
+            shuffle=False
         )
         
         # Train model on ALL data (forget + retain)
         self.logger.info("Training model on all data (forget + retain)...")
         training_epochs = self.config.get('training_epochs', 5)
         original_model = self.train_model(
-            self._copy_model(base_model),
+            copy.deepcopy(base_model),
             combined_loader,
             epochs=training_epochs,
             phase_name="original"
@@ -808,7 +473,7 @@ class UnlearningExperimentRunner:
         # Also train a "gold standard" model WITHOUT forget data (for comparison)
         self.logger.info("Training gold standard model (without forget data)...")
         gold_standard_model = self.train_model(
-            self._copy_model(base_model),
+            copy.deepcopy(base_model),
             retain_loader,
             epochs=training_epochs,
             phase_name="gold_standard"
@@ -817,18 +482,18 @@ class UnlearningExperimentRunner:
         # Evaluate original model (trained on all data)
         self.logger.info("Evaluating original model (trained on all data)...")
         original_metrics = {
-            'forget': self.evaluate_model_with_progress(original_model, forget_loader, 'original_forget'),
-            'retain': self.evaluate_model_with_progress(original_model, retain_loader, 'original_retain'),
-            'test': self.evaluate_model_with_progress(original_model, test_loader, 'original_test')
+            'forget': self.evaluator.evaluate_model(original_model, forget_loader),
+            'retain': self.evaluator.evaluate_model(original_model, retain_loader),
+            'test': self.evaluator.evaluate_model(original_model, test_loader)
         }
         self._log_verbose(f"Original metrics: {json.dumps(original_metrics, indent=2)}")
         
         # Evaluate gold standard model (trained without forget data)
         self.logger.info("Evaluating gold standard model (trained without forget data)...")
         gold_standard_metrics = {
-            'forget': self.evaluate_model_with_progress(gold_standard_model, forget_loader, 'gold_standard_forget'),
-            'retain': self.evaluate_model_with_progress(gold_standard_model, retain_loader, 'gold_standard_retain'),
-            'test': self.evaluate_model_with_progress(gold_standard_model, test_loader, 'gold_standard_test')
+            'forget': self.evaluator.evaluate_model(gold_standard_model, forget_loader),
+            'retain': self.evaluator.evaluate_model(gold_standard_model, retain_loader),
+            'test': self.evaluator.evaluate_model(gold_standard_model, test_loader)
         }
         self._log_verbose(f"Gold standard metrics: {json.dumps(gold_standard_metrics, indent=2)}")
         
@@ -867,9 +532,9 @@ class UnlearningExperimentRunner:
         # Evaluate unlearned model
         self.logger.info("Evaluating unlearned model...")
         unlearned_metrics = {
-            'forget': self.evaluate_model_with_progress(unlearned_model, forget_loader, 'unlearned_forget'),
-            'retain': self.evaluate_model_with_progress(unlearned_model, retain_loader, 'unlearned_retain'),
-            'test': self.evaluate_model_with_progress(unlearned_model, test_loader, 'unlearned_test')
+            'forget': self.evaluator.evaluate_model(unlearned_model, forget_loader),
+            'retain': self.evaluator.evaluate_model(unlearned_model, retain_loader),
+            'test': self.evaluator.evaluate_model(unlearned_model, test_loader)
         }
         self._log_verbose(f"Unlearned metrics: {json.dumps(unlearned_metrics, indent=2)}")
         
@@ -917,7 +582,6 @@ class UnlearningExperimentRunner:
         })
         
         if self.use_wandb:
-            # Log final unlearned metrics
             wandb.log({
                 'unlearned/forget_accuracy': unlearned_metrics['forget']['accuracy'],
                 'unlearned/retain_accuracy': unlearned_metrics['retain']['accuracy'],
@@ -937,30 +601,6 @@ class UnlearningExperimentRunner:
             for key, value in strategy_metrics.items():
                 if isinstance(value, (int, float)):
                     wandb.log({f'strategy/{key}': value})
-            
-            # Create and log summary table
-            summary_table = wandb.Table(columns=[
-                "Model", "Forget Accuracy", "Retain Accuracy", "Test Accuracy"
-            ])
-            summary_table.add_data(
-                "Original",
-                f"{original_metrics['forget']['accuracy']:.4f}",
-                f"{original_metrics['retain']['accuracy']:.4f}",
-                f"{original_metrics['test']['accuracy']:.4f}"
-            )
-            summary_table.add_data(
-                "Gold Standard",
-                f"{gold_standard_metrics['forget']['accuracy']:.4f}",
-                f"{gold_standard_metrics['retain']['accuracy']:.4f}",
-                f"{gold_standard_metrics['test']['accuracy']:.4f}"
-            )
-            summary_table.add_data(
-                "Unlearned",
-                f"{unlearned_metrics['forget']['accuracy']:.4f}",
-                f"{unlearned_metrics['retain']['accuracy']:.4f}",
-                f"{unlearned_metrics['test']['accuracy']:.4f}"
-            )
-            wandb.log({"summary/comparison_table": summary_table})
         
         # Save results
         self.experiment_logger.results['final_results'] = results
@@ -989,10 +629,6 @@ def main():
                        help='Disable wandb logging')
     parser.add_argument('--verbose', action='store_true',
                        help='Enable verbose logging for training and evaluation')
-    parser.add_argument('--gpu-ids', type=str, default=None,
-                       help='Comma-separated list of GPU IDs to use (e.g., "1,2,3")')
-    parser.add_argument('--batch-size', type=int, default=None,
-                       help='Override batch size from config')
     
     args = parser.parse_args()
     
@@ -1002,14 +638,6 @@ def main():
     
     if args.verbose:
         config['verbose'] = True
-    
-    # Override GPU IDs if provided via command line
-    if args.gpu_ids:
-        config['gpu_ids'] = [int(x.strip()) for x in args.gpu_ids.split(',')]
-    
-    # Override batch size if provided via command line
-    if args.batch_size:
-        config['batch_size'] = args.batch_size
     
     wandb_allowed = not args.no_wandb
     base_wandb_pref = config.get('use_wandb', True)
