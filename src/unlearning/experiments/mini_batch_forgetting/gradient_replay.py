@@ -138,9 +138,14 @@ class GradientReplayBufferUnlearning(UnlearningStrategy):
             # If buffer is empty, compute from retain loader
             avg_retain_grad = self._compute_gradients(model, retain_loader)
         
+        import logging
+        logger = logging.getLogger(__name__)
+        
         for epoch in range(self.unlearning_epochs):
+            logger.info(f"  Epoch {epoch+1}/{self.unlearning_epochs}: Computing forget gradients...")
             # Compute forget gradients
             forget_gradients = self._compute_gradients(model, forget_loader)
+            logger.info(f"  Epoch {epoch+1}/{self.unlearning_epochs}: Identifying forget regions...")
             
             # Identify forget regions
             self.forget_region_mask = self._identify_forget_regions(
@@ -148,7 +153,9 @@ class GradientReplayBufferUnlearning(UnlearningStrategy):
             )
             
             # Perform gradient update
-            for batch_data, batch_target in retain_loader:
+            epoch_loss = 0.0
+            num_batches = 0
+            for batch_idx, (batch_data, batch_target) in enumerate(retain_loader):
                 batch_data = batch_data.to(self.config.device)
                 batch_target = batch_target.to(self.config.device)
                 
@@ -171,6 +178,16 @@ class GradientReplayBufferUnlearning(UnlearningStrategy):
                                 param.grad += replay_grad * mask * self.replay_weight
                 
                 optimizer.step()
+                
+                epoch_loss += loss.item()
+                num_batches += 1
+                
+                # Log progress every 10% of batches
+                if (batch_idx + 1) % max(1, len(retain_loader) // 10) == 0:
+                    logger.info(f"    Epoch {epoch+1}/{self.unlearning_epochs}, Batch {batch_idx+1}/{len(retain_loader)}, Loss: {loss.item():.4f}")
+            
+            avg_loss = epoch_loss / max(num_batches, 1)
+            logger.info(f"  Epoch {epoch+1}/{self.unlearning_epochs} complete, Average Loss: {avg_loss:.4f}")
     
     def unlearn(self, model: nn.Module, forget_data: DataLoader,
                 retain_data: DataLoader) -> nn.Module:
@@ -181,15 +198,25 @@ class GradientReplayBufferUnlearning(UnlearningStrategy):
         1. Initialize gradient buffer with retain gradients
         2. Perform adaptive gradient updates
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         unlearned_model = copy.deepcopy(model)
         unlearned_model.to(self.config.device)
         
         # Step 1: Initialize gradient buffer
+        logger.info("Step 1/2: Initializing gradient buffer with retain gradients...")
+        logger.info(f"  Processing {len(retain_data)} batches...")
         self._update_gradient_buffer(unlearned_model, retain_data)
+        logger.info(f"  Gradient buffer initialized with {len(self.gradient_buffer)} entries")
         
         # Step 2: Perform adaptive gradient updates
+        logger.info(f"Step 2/2: Performing adaptive gradient updates for {self.unlearning_epochs} epochs...")
+        logger.info(f"  Forget batches: {len(forget_data)}, Retain batches: {len(retain_data)}")
         self._adaptive_gradient_update(unlearned_model, forget_data, retain_data)
+        logger.info("  Adaptive gradient updates complete")
         
+        logger.info("Gradient replay buffer unlearning completed successfully")
         return unlearned_model
     
     def evaluate_unlearning(self, model: nn.Module, forget_data: DataLoader,

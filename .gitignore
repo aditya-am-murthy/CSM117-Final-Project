@@ -1,5 +1,5 @@
 wandb/*
-data/*data/
+data/*
 wandb/
 *.tar.gz
 __pycache__/

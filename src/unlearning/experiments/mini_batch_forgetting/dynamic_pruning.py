@@ -46,6 +46,9 @@ class DynamicPruningUnlearning(UnlearningStrategy):
         Uses gradient-based importance: parameters with large gradients on forget data
         are considered important for forgetting.
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
         model.eval()
         importance_scores = {}
         
@@ -56,8 +59,9 @@ class DynamicPruningUnlearning(UnlearningStrategy):
         
         criterion = nn.CrossEntropyLoss()
         num_batches = 0
+        total_batches = len(forget_loader)
         
-        for data, target in forget_loader:
+        for batch_idx, (data, target) in enumerate(forget_loader):
             data = data.to(self.config.device)
             target = target.to(self.config.device)
             
@@ -72,6 +76,10 @@ class DynamicPruningUnlearning(UnlearningStrategy):
                     importance_scores[name] += torch.abs(param.grad)
             
             num_batches += 1
+            
+            # Log progress every 10% of batches
+            if (batch_idx + 1) % max(1, total_batches // 10) == 0:
+                logger.info(f"    Processed {batch_idx+1}/{total_batches} batches ({100*(batch_idx+1)/total_batches:.1f}%)")
         
         # Normalize by number of batches
         for name in importance_scores:
@@ -119,6 +127,9 @@ class DynamicPruningUnlearning(UnlearningStrategy):
     
     def _fine_tune_on_retain(self, model: nn.Module, retain_loader: DataLoader):
         """Fine-tune model on retain data while maintaining pruning mask."""
+        import logging
+        logger = logging.getLogger(__name__)
+        
         model.train()
         optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate * 0.1)
         criterion = nn.CrossEntropyLoss()
@@ -127,7 +138,7 @@ class DynamicPruningUnlearning(UnlearningStrategy):
             epoch_loss = 0.0
             num_batches = 0
             
-            for data, target in retain_loader:
+            for batch_idx, (data, target) in enumerate(retain_loader):
                 data = data.to(self.config.device)
                 target = target.to(self.config.device)
                 
@@ -147,6 +158,13 @@ class DynamicPruningUnlearning(UnlearningStrategy):
                 
                 epoch_loss += loss.item()
                 num_batches += 1
+                
+                # Log progress every 10% of batches
+                if (batch_idx + 1) % max(1, len(retain_loader) // 10) == 0:
+                    logger.info(f"  Epoch {epoch+1}/{self.fine_tune_epochs}, Batch {batch_idx+1}/{len(retain_loader)}, Loss: {loss.item():.4f}")
+            
+            avg_loss = epoch_loss / max(num_batches, 1)
+            logger.info(f"  Epoch {epoch+1}/{self.fine_tune_epochs} complete, Average Loss: {avg_loss:.4f}")
     
     def unlearn(self, model: nn.Module, forget_data: DataLoader,
                 retain_data: DataLoader) -> nn.Module:

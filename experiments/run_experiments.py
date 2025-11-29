@@ -274,8 +274,23 @@ class UnlearningExperimentRunner:
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
         
+        # Log device information
+        self.logger.info(f"Using device: {self.device}")
+        if torch.cuda.is_available():
+            self.logger.info(f"CUDA available: {torch.cuda.is_available()}")
+            self.logger.info(f"CUDA device count: {torch.cuda.device_count()}")
+            if self.device.type == 'cuda':
+                self.logger.info(f"Current CUDA device: {torch.cuda.current_device()}")
+                self.logger.info(f"CUDA device name: {torch.cuda.get_device_name(self.device)}")
+                self.logger.info(f"CUDA device memory: {torch.cuda.get_device_properties(self.device).total_memory / 1024**3:.2f} GB")
+            else:
+                self.logger.warning(f"Config requested CUDA but device is set to {self.device.type}")
+        else:
+            self.logger.warning("CUDA not available - training will run on CPU (very slow!)")
+        
         # Create experiment logger
         experiment_id = config.get('experiment_id', f"experiment_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        self.experiment_id = experiment_id  # Store for use in run_experiment
         self.experiment_logger = ExperimentLogger(experiment_id, config.get('results_dir', './results'))
         self.experiment_logger.log_config(config)
         
@@ -386,8 +401,13 @@ class UnlearningExperimentRunner:
             num_batches = 0
             
             for batch_idx, (data, target) in enumerate(train_loader):
+                # Verify data is on correct device
                 data = data.to(self.device)
                 target = target.to(self.device)
+                
+                # Debug: Log device info for first batch
+                if batch_idx == 0 and epoch == 0:
+                    self.logger.debug(f"First batch - data device: {data.device}, target device: {target.device}, model device: {next(model.parameters()).device}")
                 
                 optimizer.zero_grad()
                 output = model(data)
@@ -460,24 +480,59 @@ class UnlearningExperimentRunner:
             shuffle=False
         )
         
-        # Train model on ALL data (forget + retain)
-        self.logger.info("Training model on all data (forget + retain)...")
-        training_epochs = self.config.get('training_epochs', 5)
-        original_model = self.train_model(
-            copy.deepcopy(base_model),
-            combined_loader,
-            epochs=training_epochs,
-            phase_name="original"
-        )
+        # Check for saved models
+        models_dir = Path(self.config.get('models_dir', './saved_models'))
+        models_dir.mkdir(parents=True, exist_ok=True)
         
-        # Also train a "gold standard" model WITHOUT forget data (for comparison)
-        self.logger.info("Training gold standard model (without forget data)...")
-        gold_standard_model = self.train_model(
-            copy.deepcopy(base_model),
-            retain_loader,
-            epochs=training_epochs,
-            phase_name="gold_standard"
-        )
+        # Use the experiment_id from __init__ (or get from config if not set)
+        experiment_id = getattr(self, 'experiment_id', self.config.get('experiment_id', 'default'))
+        original_model_path = models_dir / f"{experiment_id}_original_model.pt"
+        gold_standard_model_path = models_dir / f"{experiment_id}_gold_standard_model.pt"
+        
+        self.logger.info(f"Looking for saved models with experiment_id: {experiment_id}")
+        self.logger.info(f"  Original model path: {original_model_path}")
+        self.logger.info(f"  Gold standard model path: {gold_standard_model_path}")
+        
+        # Train or load original model
+        # Note: training_epochs only applies to original and gold standard training, NOT unlearning
+        # Unlearning uses its own epoch settings (fine_tune_epochs, unlearning_epochs)
+        training_epochs = self.config.get('training_epochs', 2)
+        if original_model_path.exists():
+            self.logger.info(f"Loading saved original model from {original_model_path}")
+            original_model = copy.deepcopy(base_model)
+            original_model.load_state_dict(torch.load(original_model_path, map_location=self.device))
+            original_model.to(self.device)
+            self.logger.info("Original model loaded successfully")
+        else:
+            self.logger.info("Training model on all data (forget + retain)...")
+            original_model = self.train_model(
+                copy.deepcopy(base_model),
+                combined_loader,
+                epochs=training_epochs,
+                phase_name="original"
+            )
+            # Save original model
+            torch.save(original_model.state_dict(), original_model_path)
+            self.logger.info(f"Saved original model to {original_model_path}")
+        
+        # Train or load gold standard model
+        if gold_standard_model_path.exists():
+            self.logger.info(f"Loading saved gold standard model from {gold_standard_model_path}")
+            gold_standard_model = copy.deepcopy(base_model)
+            gold_standard_model.load_state_dict(torch.load(gold_standard_model_path, map_location=self.device))
+            gold_standard_model.to(self.device)
+            self.logger.info("Gold standard model loaded successfully")
+        else:
+            self.logger.info("Training gold standard model (without forget data)...")
+            gold_standard_model = self.train_model(
+                copy.deepcopy(base_model),
+                retain_loader,
+                epochs=training_epochs,
+                phase_name="gold_standard"
+            )
+            # Save gold standard model
+            torch.save(gold_standard_model.state_dict(), gold_standard_model_path)
+            self.logger.info(f"Saved gold standard model to {gold_standard_model_path}")
         
         # Evaluate original model (trained on all data)
         self.logger.info("Evaluating original model (trained on all data)...")
@@ -523,11 +578,28 @@ class UnlearningExperimentRunner:
         self.logger.info("Creating unlearning strategy...")
         unlearning_strategy = self.create_unlearning_strategy()
         
-        # Perform unlearning
-        self.logger.info("Performing unlearning...")
-        unlearned_model = unlearning_strategy.unlearn(
-            original_model, forget_loader, retain_loader
-        )
+        # Perform unlearning with progress tracking
+        self.logger.info("=" * 60)
+        self.logger.info("Starting unlearning process...")
+        self.logger.info(f"Strategy: {self.config.get('unlearning_strategy', 'unknown')}")
+        self.logger.info(f"Forget data batches: {len(forget_loader)}")
+        self.logger.info(f"Retain data batches: {len(retain_loader)}")
+        self.logger.info("=" * 60)
+        
+        import time
+        unlearning_start_time = time.time()
+        
+        try:
+            unlearned_model = unlearning_strategy.unlearn(
+                original_model, forget_loader, retain_loader
+            )
+            unlearning_time = time.time() - unlearning_start_time
+            self.logger.info(f"Unlearning completed in {unlearning_time:.2f} seconds ({unlearning_time/60:.2f} minutes)")
+        except Exception as e:
+            self.logger.error(f"Error during unlearning: {e}")
+            import traceback
+            self.logger.error(traceback.format_exc())
+            raise
         
         # Evaluate unlearned model
         self.logger.info("Evaluating unlearned model...")
