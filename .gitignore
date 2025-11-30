@@ -1,1 +1,10 @@
 /venv/*
+wandb/*
+data/*
+wandb/
+*.tar.gz
+__pycache__/
+*.pyc
+saved_models/*
+hyperparameter_search_results/*
+results/*
