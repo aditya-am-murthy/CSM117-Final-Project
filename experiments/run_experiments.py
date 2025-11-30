@@ -365,7 +365,9 @@ class UnlearningExperimentRunner:
                 fl_config,
                 pruning_ratio=self.config.get('pruning_ratio', 0.1),
                 importance_threshold=self.config.get('importance_threshold', 0.5),
-                fine_tune_epochs=self.config.get('fine_tune_epochs', 5)
+                fine_tune_epochs=self.config.get('fine_tune_epochs', 5),
+                forget_loss_weight=self.config.get('forget_loss_weight', 1.0),
+                prune_classifier_only=self.config.get('prune_classifier_only', False)
             )
         elif strategy_type == 'gradient_replay':
             return GradientReplayBufferUnlearning(
@@ -486,12 +488,42 @@ class UnlearningExperimentRunner:
         
         # Use the experiment_id from __init__ (or get from config if not set)
         experiment_id = getattr(self, 'experiment_id', self.config.get('experiment_id', 'default'))
+        experiment_name = self.config.get('experiment_name', 'experiment')
+        
+        # First try exact experiment_id match
         original_model_path = models_dir / f"{experiment_id}_original_model.pt"
         gold_standard_model_path = models_dir / f"{experiment_id}_gold_standard_model.pt"
         
-        self.logger.info(f"Looking for saved models with experiment_id: {experiment_id}")
-        self.logger.info(f"  Original model path: {original_model_path}")
-        self.logger.info(f"  Gold standard model path: {gold_standard_model_path}")
+        # If not found, search for models with same experiment_name (without timestamp)
+        # This allows reusing models from previous runs with the same experiment config
+        if not original_model_path.exists() or not gold_standard_model_path.exists():
+            self.logger.info(f"Models not found with exact experiment_id: {experiment_id}")
+            self.logger.info(f"Searching for models with experiment_name: {experiment_name}")
+            
+            # Find all models matching the experiment_name pattern
+            original_pattern = f"{experiment_name}_*_original_model.pt"
+            gold_pattern = f"{experiment_name}_*_gold_standard_model.pt"
+            
+            original_matches = sorted(models_dir.glob(original_pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+            gold_matches = sorted(models_dir.glob(gold_pattern), key=lambda p: p.stat().st_mtime, reverse=True)
+            
+            if original_matches and gold_matches:
+                # Use the most recent matching models
+                original_model_path = original_matches[0]
+                gold_standard_model_path = gold_matches[0]
+                self.logger.info(f"Found saved models from previous run:")
+                self.logger.info(f"  Original model: {original_model_path.name}")
+                self.logger.info(f"  Gold standard model: {gold_standard_model_path.name}")
+            elif original_matches:
+                self.logger.warning(f"Found original model but not gold standard. Will retrain gold standard.")
+                original_model_path = original_matches[0]
+            elif gold_matches:
+                self.logger.warning(f"Found gold standard model but not original. Will retrain original.")
+                gold_standard_model_path = gold_matches[0]
+        
+        self.logger.info(f"Using model paths:")
+        self.logger.info(f"  Original model: {original_model_path}")
+        self.logger.info(f"  Gold standard model: {gold_standard_model_path}")
         
         # Train or load original model
         # Note: training_epochs only applies to original and gold standard training, NOT unlearning
