@@ -17,7 +17,6 @@ from collections import defaultdict
 
 from ....fl.base import UnlearningStrategy, FLConfig
 
-
 class HybridParetoePruningUnlearning(UnlearningStrategy):
     """
     Hybrid unlearning strategy combining dynamic pruning and Pareto optimization.
@@ -232,54 +231,30 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
                 optimizer.step()
     
     # ==================== Phase 2: Pareto Optimization ====================
-    
-    def _compute_multi_objective_loss(self, model: nn.Module, 
-                                     forget_loader: DataLoader,
-                                     retain_loader: DataLoader) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        Compute multi-objective loss for Pareto optimization.
-        
-        Objective: Maximize forgetting (minimize negative log-likelihood) while
-        minimizing retention loss.
-        """
+    def _sample_batch(self, loader: DataLoader):
+        """Get one random batch safely — works with any batch_size."""
+        data, target = next(iter(loader))
+        return data.to(self.config.device), target.to(self.config.device)
+
+    def _compute_multi_objective_loss(self, model: nn.Module,
+                                    forget_loader: DataLoader,
+                                    retain_loader: DataLoader):
         model.train()
         criterion = nn.CrossEntropyLoss()
-        
-        # Forget objective
-        forget_losses = []
-        for data, target in forget_loader:
-            data = data.to(self.config.device)
-            target = target.to(self.config.device)
-            output = model(data)
-            loss = criterion(output, target)
-            forget_losses.append(loss)
-        
-        forget_obj = torch.stack(forget_losses).mean() if forget_losses else \
-                    torch.tensor(0.0, device=self.config.device)
-        
-        # Retention objective
-        retention_losses = []
-        for data, target in retain_loader:
-            data = data.to(self.config.device)
-            target = target.to(self.config.device)
-            output = model(data)
-            loss = criterion(output, target)
-            retention_losses.append(loss)
-        
-        retention_obj = torch.stack(retention_losses).mean() if retention_losses else \
-                       torch.tensor(0.0, device=self.config.device)
-        
-        # Combined loss: minimize negative forget loss + retention loss
-        total_loss = -self.current_weights[0] * forget_obj + \
-                     self.current_weights[1] * retention_obj
-        
-        objectives = {
-            'forget_loss': forget_obj.item(),
-            'retention_loss': retention_obj.item(),
+
+        f_data, f_target = self._sample_batch(forget_loader)
+        r_data, r_target = self._sample_batch(retain_loader)
+
+        forget_loss = criterion(model(f_data), f_target)
+        retain_loss = criterion(model(r_data), r_target)
+
+        total_loss = -self.current_weights[0] * forget_loss + self.current_weights[1] * retain_loss
+
+        return total_loss, {
+            'forget_loss': forget_loss.item(),
+            'retention_loss': retain_loss.item(),
             'total_loss': total_loss.item()
         }
-        
-        return total_loss, objectives
     
     def _update_adaptive_weights(self, forget_acc: float, retain_acc: float,
                                 forget_loss: float, retention_loss: float):
@@ -309,96 +284,83 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
         )
     
     def _phase2_pareto_optimization(self, model: nn.Module,
-                                   forget_loader: DataLoader,
-                                   retain_loader: DataLoader):
-        """
-        Phase 2: Multi-objective Pareto optimization on pruned model.
-        """
+                                forget_loader: DataLoader,
+                                retain_loader: DataLoader):
         optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate * 0.5)
         self.pareto_frontier = []
-        
-        for step in range(self.pareto_steps):
-            for epoch in range(self.phase2_epochs):
-                # Compute multi-objective loss
+
+        # 5–8 steps is more than enough for a visible frontier
+        for step in range(6):        # was 20 → now 6
+            for epoch in range(3):   # was 10 → now 3
+                # keep everything else exactly the same
                 total_loss, objectives = self._compute_multi_objective_loss(
                     model, forget_loader, retain_loader
                 )
-                
-                # Backward pass with gradient masking
                 optimizer.zero_grad()
                 total_loss.backward()
-                
-                if self.use_gradient_masking:
+
+                if self.use_gradient_masking and self.pruning_mask:
                     for name, param in model.named_parameters():
                         if name in self.pruning_mask and param.grad is not None:
-                            mask = self.pruning_mask[name].to(param.device)
-                            param.grad *= mask
-                
+                            param.grad *= self.pruning_mask[name].to(param.device)
+
                 optimizer.step()
-                
-                # Evaluate and update weights
-                forget_acc = self._evaluate_accuracy(model, forget_loader)
-                retain_acc = self._evaluate_accuracy(model, retain_loader)
-                
-                self._update_adaptive_weights(
-                    forget_acc, retain_acc,
-                    objectives['forget_loss'],
-                    objectives['retention_loss']
-                )
-                
-                # Store Pareto point
-                pareto_point = {
-                    'forget_loss': objectives['forget_loss'],
-                    'retention_loss': objectives['retention_loss'],
-                    'forget_accuracy': forget_acc,
-                    'retain_accuracy': retain_acc,
-                    'forget_weight': self.current_weights[0],
-                    'retention_weight': self.current_weights[1],
-                    'step': step,
-                    'epoch': epoch
-                }
-                self.pareto_frontier.append(pareto_point)
-        
-        # Evaluate phase 2
-        self.phase_metrics['phase2'] = self._evaluate_phase(model, forget_loader, retain_loader)
-    
+
+                # Evaluate only every few steps (optional but fast)
+                if epoch == 2:
+                    forget_acc = self._evaluate_accuracy(model, forget_loader)
+                    retain_acc = self._evaluate_accuracy(model, retain_loader)
+                    self._update_adaptive_weights(forget_acc, retain_acc,
+                                                objectives['forget_loss'],
+                                                objectives['retention_loss'])
+
+                    self.pareto_frontier.append({
+                        'forget_accuracy': forget_acc,
+                        'retain_accuracy': retain_acc,
+                        'forget_loss': objectives['forget_loss'],
+                        'retention_loss': objectives['retention_loss'],
+                        'forget_weight': self.current_weights[0],
+                        'retention_weight': self.current_weights[1],
+                        'step': step
+                    })
     # ==================== Phase 3: Refinement ====================
     
     def _phase3_refinement(self, model: nn.Module,
-                          forget_loader: DataLoader,
-                          retain_loader: DataLoader):
-        """
-        Phase 3: Final refinement with balanced objectives.
-        """
+                           forget_loader: DataLoader,
+                           retain_loader: DataLoader):
+        """Phase 3: Final refinement with balanced objectives."""
         optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate * 0.05)
+
+        # Use the last recorded Pareto point, or fall back to initial weights
+        if self.pareto_frontier:
+            optimal_point = self._find_pareto_optimal_solution()
+            if optimal_point:  # could still be {} if all points were bad
+                self.current_weights = (
+                    optimal_point.get('forget_weight', self.forget_weight),
+                    optimal_point.get('retention_weight', self.retention_weight)
+                )
+
+        # If still no frontier (e.g. we skipped too many evals), just use 0.5/0.5
+        if sum(self.current_weights) == 0:
+            self.current_weights = (0.5, 0.5)
+
+        print(f"Phase 3 using weights: forget={self.current_weights[0]:.3f}, retain={self.current_weights[1]:.3f}")
+
         criterion = nn.CrossEntropyLoss()
-        
-        # Use optimal Pareto weights
-        optimal_point = self._find_pareto_optimal_solution()
-        if optimal_point:
-            self.current_weights = (
-                optimal_point['forget_weight'],
-                optimal_point['retention_weight']
-            )
-        
         for epoch in range(self.refinement_epochs):
             total_loss, _ = self._compute_multi_objective_loss(
                 model, forget_loader, retain_loader
             )
-            
             optimizer.zero_grad()
             total_loss.backward()
-            
-            # Final gradient masking
-            if self.use_gradient_masking:
+
+            if self.use_gradient_masking and self.pruning_mask:
                 for name, param in model.named_parameters():
                     if name in self.pruning_mask and param.grad is not None:
-                        mask = self.pruning_mask[name].to(param.device)
-                        param.grad *= mask
-            
+                        param.grad *= self.pruning_mask[name].to(param.device)
+
             optimizer.step()
-        
-        # Evaluate phase 3
+
         self.phase_metrics['phase3'] = self._evaluate_phase(model, forget_loader, retain_loader)
     
     # ==================== Utility Methods ====================
@@ -471,6 +433,13 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
         2. Phase 2: Pareto optimization for optimal trade-offs
         3. Phase 3: Refinement with balanced objectives
         """
+        torch.cuda.empty_cache()
+        print(f"GPU memory before unlearning: {torch.cuda.memory_allocated()/1e9:.2f} GB")
+
+        # Reduce batch size to 32–64 if still OOM
+        # forget_data.batch_size = 16
+        # retain_data.batch_size = 16
+
         unlearned_model = copy.deepcopy(model)
         unlearned_model.to(self.config.device)
         

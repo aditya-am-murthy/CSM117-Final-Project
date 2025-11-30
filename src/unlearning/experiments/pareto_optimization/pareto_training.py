@@ -163,7 +163,7 @@ def load_cifar10_data():
     return train_dataset, test_dataset
 
 
-def split_dataset(dataset, forget_ratio=0.2, batch_size=8):
+def split_dataset(dataset, forget_ratio=0.2, batch_size=2):
     """
     Split dataset into forget and retain sets.
     
@@ -234,75 +234,76 @@ def train_base_model(model, train_loader, config, epochs=5):
 
 # NOTE: Assuming the HybridParetoePruningUnlearning class is imported
 # from your_module import HybridParetoePruningUnlearning
+from .pareto_pruning import HybridParetoePruningUnlearning
 
-# For demonstration, we'll define a minimal version here:
-class HybridUnlearningDemo:
-    """Simplified version for demonstration."""
-    def __init__(self, config, pruning_ratio=0.15, forget_weight=0.5,
-                 retention_weight=0.5, pareto_steps=10):
-        self.config = config
-        self.pruning_ratio = pruning_ratio
-        self.forget_weight = forget_weight
-        self.retention_weight = retention_weight
-        self.pareto_steps = pareto_steps
+# # For demonstration, we'll define a minimal version here:
+# class HybridUnlearningDemo:
+#     """Simplified version for demonstration."""
+#     def __init__(self, config, pruning_ratio=0.15, forget_weight=0.5,
+#                  retention_weight=0.5, pareto_steps=10):
+#         self.config = config
+#         self.pruning_ratio = pruning_ratio
+#         self.forget_weight = forget_weight
+#         self.retention_weight = retention_weight
+#         self.pareto_steps = pareto_steps
     
-    def unlearn(self, model, forget_data, retain_data):
-        print("\n=== Starting Hybrid Unlearning ===")
-        print(f"Pruning Ratio: {self.pruning_ratio}")
-        print(f"Forget Weight: {self.forget_weight}")
-        print(f"Retention Weight: {self.retention_weight}")
-        print(f"Pareto Steps: {self.pareto_steps}")
+#     def unlearn(self, model, forget_data, retain_data):
+#         print("\n=== Starting Hybrid Unlearning ===")
+#         print(f"Pruning Ratio: {self.pruning_ratio}")
+#         print(f"Forget Weight: {self.forget_weight}")
+#         print(f"Retention Weight: {self.retention_weight}")
+#         print(f"Pareto Steps: {self.pareto_steps}")
         
-        # This is a placeholder - use the actual implementation
-        import copy
-        unlearned_model = copy.deepcopy(model)
+#         # This is a placeholder - use the actual implementation
+#         import copy
+#         unlearned_model = copy.deepcopy(model)
         
-        print("\nPhase 1: Dynamic Pruning...")
-        # Actual pruning would happen here
+#         print("\nPhase 1: Dynamic Pruning...")
+#         # Actual pruning would happen here
         
-        print("Phase 2: Pareto Optimization...")
-        # Actual optimization would happen here
+#         print("Phase 2: Pareto Optimization...")
+#         # Actual optimization would happen here
         
-        print("Phase 3: Refinement...")
-        # Actual refinement would happen here
+#         print("Phase 3: Refinement...")
+#         # Actual refinement would happen here
         
-        return unlearned_model
+#         return unlearned_model
     
-    def evaluate_unlearning(self, model, forget_data, retain_data):
-        model.eval()
-        device = self.config.device
+#     def evaluate_unlearning(self, model, forget_data, retain_data):
+#         model.eval()
+#         device = self.config.device
         
-        # Evaluate forget data
-        forget_correct = 0
-        forget_total = 0
-        with torch.no_grad():
-            for data, target in forget_data:
-                data, target = data.to(device), target.to(device)
-                output = model(data)
-                pred = output.argmax(dim=1)
-                forget_correct += (pred == target).sum().item()
-                forget_total += target.size(0)
+#         # Evaluate forget data
+#         forget_correct = 0
+#         forget_total = 0
+#         with torch.no_grad():
+#             for data, target in forget_data:
+#                 data, target = data.to(device), target.to(device)
+#                 output = model(data)
+#                 pred = output.argmax(dim=1)
+#                 forget_correct += (pred == target).sum().item()
+#                 forget_total += target.size(0)
         
-        # Evaluate retain data
-        retain_correct = 0
-        retain_total = 0
-        with torch.no_grad():
-            for data, target in retain_data:
-                data, target = data.to(device), target.to(device)
-                output = model(data)
-                pred = output.argmax(dim=1)
-                retain_correct += (pred == target).sum().item()
-                retain_total += target.size(0)
+#         # Evaluate retain data
+#         retain_correct = 0
+#         retain_total = 0
+#         with torch.no_grad():
+#             for data, target in retain_data:
+#                 data, target = data.to(device), target.to(device)
+#                 output = model(data)
+#                 pred = output.argmax(dim=1)
+#                 retain_correct += (pred == target).sum().item()
+#                 retain_total += target.size(0)
         
-        forget_acc = forget_correct / max(forget_total, 1)
-        retain_acc = retain_correct / max(retain_total, 1)
+#         forget_acc = forget_correct / max(forget_total, 1)
+#         retain_acc = retain_correct / max(retain_total, 1)
         
-        return {
-            'forget_accuracy': forget_acc,
-            'retain_accuracy': retain_acc,
-            'unlearning_effectiveness': 1.0 - forget_acc,
-            'retention_preservation': retain_acc
-        }
+#         return {
+#             'forget_accuracy': forget_acc,
+#             'retain_accuracy': retain_acc,
+#             'unlearning_effectiveness': 1.0 - forget_acc,
+#             'retention_preservation': retain_acc
+#         }
 
 
 # ==================== Step 6: Main Execution ====================
@@ -354,13 +355,13 @@ def main(use_real_data=False, dataset_type='cifar10'):
         print(f"Dataset size: {len(full_dataset)}")
         training_epochs = 5
     
-    full_loader = DataLoader(full_dataset, batch_size=8, shuffle=True)
+    full_loader = DataLoader(full_dataset, batch_size=2, shuffle=True)
     
     # Split into forget and retain
     forget_loader, retain_loader = split_dataset(
         full_dataset, 
         forget_ratio=0.2,  # 20% of data to forget
-        batch_size=8
+        batch_size=2
     )
     print(f"Forget set size: {len(forget_loader.dataset)}")
     print(f"Retain set size: {len(retain_loader.dataset)}")
@@ -384,7 +385,7 @@ def main(use_real_data=False, dataset_type='cifar10'):
     # from your_module import HybridParetoePruningUnlearning
     # unlearning_strategy = HybridParetoePruningUnlearning(
     
-    unlearning_strategy = HybridUnlearningDemo(
+    unlearning_strategy = HybridParetoePruningUnlearning(
         config=config,
         pruning_ratio=0.15,          # Prune 15% of parameters
         forget_weight=0.5,            # Initial forget objective weight
@@ -507,7 +508,7 @@ def advanced_example():
     
     # Example 1: Aggressive unlearning (prioritize forgetting)
     print("\n--- Example 1: Aggressive Unlearning ---")
-    aggressive_strategy = HybridUnlearningDemo(
+    aggressive_strategy = HybridParetoePruningUnlearning(
         config=config,
         pruning_ratio=0.25,       # More aggressive pruning
         forget_weight=0.7,        # Prioritize forgetting
@@ -517,7 +518,7 @@ def advanced_example():
     
     # Example 2: Conservative unlearning (prioritize retention)
     print("\n--- Example 2: Conservative Unlearning ---")
-    conservative_strategy = HybridUnlearningDemo(
+    conservative_strategy = HybridParetoePruningUnlearning(
         config=config,
         pruning_ratio=0.1,        # Less aggressive pruning
         forget_weight=0.3,        # Prioritize retention
@@ -527,7 +528,7 @@ def advanced_example():
     
     # Example 3: Balanced unlearning
     print("\n--- Example 3: Balanced Unlearning ---")
-    balanced_strategy = HybridUnlearningDemo(
+    balanced_strategy = HybridParetoePruningUnlearning(
         config=config,
         pruning_ratio=0.15,       # Moderate pruning
         forget_weight=0.5,        # Equal weights
