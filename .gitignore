@@ -1,4 +1,7 @@
+<<<<<<< HEAD
 /venv/*
+=======
+>>>>>>> c87cac90d7ff2ab18b1b7f3a89e7a1893b13a9c4
 wandb/*
 data/*
 wandb/

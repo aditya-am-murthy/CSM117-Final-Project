@@ -109,7 +109,12 @@ Splits data for unlearning experiments.
 from src.data.dataset_manager import UnlearningDataSplitter
 
 forget_loader, retain_loader, test_loader = UnlearningDataSplitter.split_for_unlearning(
-    dataset, forget_ratio=0.1, test_ratio=0.2
+    dataset,
+    forget_ratio=0.1,
+    test_ratio=0.2,
+    batch_size=64,
+    seed=42,
+    stratified=True
 )
 ```
 

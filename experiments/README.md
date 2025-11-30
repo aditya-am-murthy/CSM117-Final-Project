@@ -52,13 +52,26 @@ wandb login
 Use the `run_experiments.py` script with a configuration file:
 
 ```bash
-python experiments/run_experiments.py --config experiments/configs/mini_batch_forgetting_dynamic_pruning.json
+python experiments/run_experiments.py --config experiments/configs/mini_batch_forgetting_dynamic_pruning.json --verbose
 ```
+
+- Pass `--verbose` (or `"verbose": true` in the config) to see per-batch/epoch logs, dataset split sizes, and evaluation summaries.
 
 Available configuration files:
 - `experiments/configs/mini_batch_forgetting_dynamic_pruning.json`
 - `experiments/configs/mini_batch_forgetting_gradient_replay.json`
 - `experiments/configs/pareto_optimization.json`
+- `experiments/configs/report_suite.json` (runs the full set of report experiments)
+
+### Report Experiment Suite
+
+To reproduce the ablations described in the project report (forget ratios of 5–30%, pruning ratios of 10–50%, replay buffers of 500–5,000, and Pareto weight sweeps), run:
+
+```bash
+python experiments/run_experiments.py --config experiments/configs/report_suite.json --no-wandb
+```
+
+The new configuration format defines an `experiment_suite` with parameter grids. The runner automatically creates one experiment per grid combination, enforces deterministic stratified splits (seed 42), and writes an aggregated summary to `results/report_core_suite/suite_summary.json`.
 
 ### Configuration Format
 

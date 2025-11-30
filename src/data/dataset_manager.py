@@ -236,32 +236,77 @@ class UnlearningDataSplitter:
     @staticmethod
     def split_for_unlearning(dataset: torch.utils.data.Dataset, 
                            forget_ratio: float = 0.1,
-                           test_ratio: float = 0.2) -> Tuple[DataLoader, DataLoader, DataLoader]:
+                           test_ratio: float = 0.2,
+                           batch_size: int = 32,
+                           seed: Optional[int] = None,
+                           stratified: bool = False) -> Tuple[DataLoader, DataLoader, DataLoader]:
         """
         Split dataset into forget, retain, and test sets.
         
         Args:
             dataset: Dataset to split
-            forget_ratio: Ratio of data to forget
+            forget_ratio: Ratio of data to forget (applied after removing test set)
             test_ratio: Ratio of data for testing
+            batch_size: Batch size for resulting data loaders
+            seed: Optional random seed for reproducibility
+            stratified: Whether to perform class-balanced splitting
             
         Returns:
             Tuple of (forget_loader, retain_loader, test_loader)
         """
-        total_size = len(dataset)
-        test_size = int(total_size * test_ratio)
-        forget_size = int((total_size - test_size) * forget_ratio)
-        retain_size = total_size - test_size - forget_size
+        if seed is not None:
+            torch.manual_seed(seed)
+            random.seed(seed)
+            np.random.seed(seed)
         
-        test_dataset, temp_dataset = random_split(
-            dataset, [test_size, total_size - test_size]
-        )
-        forget_dataset, retain_dataset = random_split(
-            temp_dataset, [forget_size, retain_size]
-        )
+        if stratified and hasattr(dataset, 'targets'):
+            targets = dataset.targets
+            if isinstance(targets, torch.Tensor):
+                targets = targets.tolist()
+            class_to_indices = defaultdict(list)
+            for idx, label in enumerate(targets):
+                class_to_indices[int(label)].append(idx)
+            
+            rng = np.random.default_rng(seed)
+            forget_indices = []
+            retain_indices = []
+            test_indices = []
+            
+            for indices in class_to_indices.values():
+                indices = indices.copy()
+                rng.shuffle(indices)
+                
+                class_size = len(indices)
+                test_count = int(round(class_size * test_ratio))
+                remaining = class_size - test_count
+                forget_count = int(round(remaining * forget_ratio))
+                
+                test_indices.extend(indices[:test_count])
+                forget_indices.extend(indices[test_count:test_count + forget_count])
+                retain_indices.extend(indices[test_count + forget_count:])
+            
+            forget_dataset = Subset(dataset, forget_indices)
+            retain_dataset = Subset(dataset, retain_indices)
+            test_dataset = Subset(dataset, test_indices)
+        else:
+            total_size = len(dataset)
+            test_size = int(total_size * test_ratio)
+            forget_size = int((total_size - test_size) * forget_ratio)
+            retain_size = total_size - test_size - forget_size
+            
+            generator = torch.Generator()
+            if seed is not None:
+                generator.manual_seed(seed)
+            
+            test_dataset, temp_dataset = random_split(
+                dataset, [test_size, total_size - test_size], generator=generator
+            )
+            forget_dataset, retain_dataset = random_split(
+                temp_dataset, [forget_size, retain_size], generator=generator
+            )
         
-        forget_loader = DataLoader(forget_dataset, batch_size=32, shuffle=True)
-        retain_loader = DataLoader(retain_dataset, batch_size=32, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+        forget_loader = DataLoader(forget_dataset, batch_size=batch_size, shuffle=True)
+        retain_loader = DataLoader(retain_dataset, batch_size=batch_size, shuffle=True)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
         
         return forget_loader, retain_loader, test_loader

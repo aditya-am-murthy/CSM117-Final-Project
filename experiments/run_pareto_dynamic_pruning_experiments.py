@@ -1,9 +1,10 @@
 """
-Modular training script for unlearning experiments.
+Pareto Optimization with Dynamic Pruning training script for unlearning experiments.
 
-This script supports:
-1. Mini-batch forgetting with dynamic pruning and gradient replay buffers
-2. Multi-objective learning frameworks (Pareto optimization)
+This script combines:
+1. Dynamic pruning to identify and isolate forget regions
+2. Pareto optimization to fine-tune the pruned model, optimizing trade-offs
+   between forgetting and retention objectives
 
 All experiments are logged to JSON files and wandb.
 """
@@ -31,12 +32,8 @@ sys.path.append(str(Path(__file__).parent.parent))
 from src.data.dataset_manager import DatasetManager, UnlearningDataSplitter
 from src.utils.model_loader import load_vit_model, create_model_from_config
 from src.evaluation.metrics import UnlearningEvaluator
-from src.unlearning.experiments.mini_batch_forgetting import (
-    DynamicPruningUnlearning,
-    GradientReplayBufferUnlearning
-)
-from src.unlearning.experiments.pareto_optimization import (
-    ParetoOptimizationUnlearning
+from src.unlearning.experiments.pareto_dynamic_pruning import (
+    ParetoDynamicPruningUnlearning
 )
 from src.fl.base import FLConfig
 
@@ -348,9 +345,7 @@ class UnlearningExperimentRunner:
     
     
     def create_unlearning_strategy(self):
-        """Create unlearning strategy based on configuration."""
-        strategy_type = self.config.get('unlearning_strategy', 'dynamic_pruning')
-        
+        """Create Pareto + Dynamic Pruning unlearning strategy based on configuration."""
         fl_config = FLConfig(
             num_clients=self.config.get('num_clients', 10),
             num_rounds=self.config.get('num_rounds', 100),
@@ -360,34 +355,20 @@ class UnlearningExperimentRunner:
             device=str(self.device)
         )
         
-        if strategy_type == 'dynamic_pruning':
-            return DynamicPruningUnlearning(
-                fl_config,
-                pruning_ratio=self.config.get('pruning_ratio', 0.1),
-                importance_threshold=self.config.get('importance_threshold', 0.5),
-                fine_tune_epochs=self.config.get('fine_tune_epochs', 5),
-                forget_loss_weight=self.config.get('forget_loss_weight', 1.0),
-                prune_classifier_only=self.config.get('prune_classifier_only', False)
-            )
-        elif strategy_type == 'gradient_replay':
-            return GradientReplayBufferUnlearning(
-                fl_config,
-                buffer_size=self.config.get('buffer_size', 100),
-                replay_weight=self.config.get('replay_weight', 0.5),
-                adaptive_threshold=self.config.get('adaptive_threshold', 0.1),
-                unlearning_epochs=self.config.get('unlearning_epochs', 10)
-            )
-        elif strategy_type == 'pareto_optimization':
-            return ParetoOptimizationUnlearning(
-                fl_config,
-                forget_weight=self.config.get('forget_weight', 0.5),
-                retention_weight=self.config.get('retention_weight', 0.5),
-                pareto_steps=self.config.get('pareto_steps', 20),
-                adaptive_weights=self.config.get('adaptive_weights', True),
-                unlearning_epochs=self.config.get('unlearning_epochs', 10)
-            )
-        else:
-            raise ValueError(f"Unknown unlearning strategy: {strategy_type}")
+        # Always use the combined Pareto + Dynamic Pruning strategy
+        return ParetoDynamicPruningUnlearning(
+            fl_config,
+            # Dynamic pruning parameters
+            pruning_ratio=self.config.get('pruning_ratio', 0.1),
+            importance_threshold=self.config.get('importance_threshold', 0.5),
+            prune_classifier_only=self.config.get('prune_classifier_only', False),
+            # Pareto optimization parameters
+            forget_weight=self.config.get('forget_weight', 0.5),
+            retention_weight=self.config.get('retention_weight', 0.5),
+            pareto_steps=self.config.get('pareto_steps', 20),
+            adaptive_weights=self.config.get('adaptive_weights', True),
+            unlearning_epochs=self.config.get('unlearning_epochs', 10)
+        )
     
     def train_model(self, model: nn.Module, train_loader: DataLoader, epochs: int = 5,
                     phase_name: str = "train") -> nn.Module:
@@ -613,7 +594,7 @@ class UnlearningExperimentRunner:
         # Perform unlearning with progress tracking
         self.logger.info("=" * 60)
         self.logger.info("Starting unlearning process...")
-        self.logger.info(f"Strategy: {self.config.get('unlearning_strategy', 'unknown')}")
+        self.logger.info(f"Strategy: pareto_dynamic_pruning (combined dynamic pruning + Pareto optimization)")
         self.logger.info(f"Forget data batches: {len(forget_loader)}")
         self.logger.info(f"Retain data batches: {len(retain_loader)}")
         self.logger.info("=" * 60)
