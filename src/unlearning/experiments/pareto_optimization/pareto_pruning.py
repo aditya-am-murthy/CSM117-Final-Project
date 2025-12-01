@@ -15,7 +15,7 @@ import copy
 import numpy as np
 from collections import defaultdict
 
-from ....fl.base import UnlearningStrategy, FLConfig
+from src.fl.base import UnlearningStrategy, FLConfig
 
 class HybridParetoePruningUnlearning(UnlearningStrategy):
     """

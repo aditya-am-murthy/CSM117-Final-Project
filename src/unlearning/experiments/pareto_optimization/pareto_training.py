@@ -1,12 +1,8 @@
 """
-Complete example showing how to run the Hybrid Pareto-Pruning Unlearning model.
+Hyperparameter Search Training Script for Hybrid Pareto-Pruning Unlearning.
 
-This script demonstrates:
-1. Setting up the environment and data
-2. Creating and training a base model
-3. Configuring the hybrid unlearning strategy
-4. Running the unlearning process
-5. Evaluating and visualizing results
+This script wraps the training in a loop to search over hyperparameters,
+with epochs=3 and batch_size=2, saving results to CSV.
 """
 
 import torch
@@ -14,24 +10,29 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset, Subset
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from typing import Dict, List
+from datetime import datetime
+import os
+from itertools import product
+import csv
 
 
-# ==================== Step 1: Define FLConfig (Base Configuration) ====================
+# ==================== Configuration ====================
 
 class FLConfig:
-    """Federated Learning configuration (simplified version)."""
+    """Federated Learning configuration."""
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu',
                  learning_rate=0.001):
         self.device = device
         self.learning_rate = learning_rate
 
 
-# ==================== Step 2: Create a Simple Model ====================
+# ==================== Models ====================
 
 class SimpleNN(nn.Module):
-    """Simple neural network for MNIST (grayscale 28x28 images)."""
+    """Simple neural network for MNIST."""
     def __init__(self, input_size=784, hidden_size=128, num_classes=10):
         super(SimpleNN, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
@@ -40,7 +41,7 @@ class SimpleNN(nn.Module):
         self.fc3 = nn.Linear(hidden_size, num_classes)
     
     def forward(self, x):
-        x = x.view(x.size(0), -1)  # Flatten
+        x = x.view(x.size(0), -1)
         x = self.relu(self.fc1(x))
         x = self.relu(self.fc2(x))
         x = self.fc3(x)
@@ -48,10 +49,9 @@ class SimpleNN(nn.Module):
 
 
 class CIFAR10Net(nn.Module):
-    """CNN for CIFAR-10 (color 32x32 images)."""
+    """CNN for CIFAR-10."""
     def __init__(self, num_classes=10):
         super(CIFAR10Net, self).__init__()
-        # Convolutional layers
         self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(32)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
@@ -63,26 +63,18 @@ class CIFAR10Net(nn.Module):
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.3)
         
-        # Fully connected layers
-        # After 3 pooling layers: 32->16->8->4
         self.fc1 = nn.Linear(128 * 4 * 4, 256)
         self.fc2 = nn.Linear(256, 128)
         self.fc3 = nn.Linear(128, num_classes)
     
     def forward(self, x):
-        # Conv block 1
         x = self.relu(self.bn1(self.conv1(x)))
-        x = self.pool(x)  # 32x32 -> 16x16
-        
-        # Conv block 2
+        x = self.pool(x)
         x = self.relu(self.bn2(self.conv2(x)))
-        x = self.pool(x)  # 16x16 -> 8x8
-        
-        # Conv block 3
+        x = self.pool(x)
         x = self.relu(self.bn3(self.conv3(x)))
-        x = self.pool(x)  # 8x8 -> 4x4
+        x = self.pool(x)
         
-        # Flatten and FC layers
         x = x.view(x.size(0), -1)
         x = self.dropout(self.relu(self.fc1(x)))
         x = self.dropout(self.relu(self.fc2(x)))
@@ -90,47 +82,12 @@ class CIFAR10Net(nn.Module):
         return x
 
 
-# ==================== Step 3: Create Synthetic Dataset ====================
-
-def create_synthetic_data(num_samples=1000, input_size=784, num_classes=10):
-    """Create synthetic dataset for demonstration."""
-    X = torch.randn(num_samples, input_size)
-    y = torch.randint(0, num_classes, (num_samples,))
-    return TensorDataset(X, y)
-
-
-def load_real_mnist_data():
-    """Load real MNIST dataset for realistic training."""
-    from torchvision import datasets, transforms
-    
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.1307,), (0.3081,))
-    ])
-    
-    # Download and load training data
-    train_dataset = datasets.MNIST(
-        './data', 
-        train=True, 
-        download=True, 
-        transform=transform
-    )
-    
-    test_dataset = datasets.MNIST(
-        './data',
-        train=False,
-        download=True,
-        transform=transform
-    )
-    
-    return train_dataset, test_dataset
-
+# ==================== Data Loading ====================
 
 def load_cifar10_data():
-    """Load CIFAR-10 dataset for realistic training."""
+    """Load CIFAR-10 dataset."""
     from torchvision import datasets, transforms
     
-    # CIFAR-10 specific transforms with data augmentation
     transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
@@ -138,48 +95,26 @@ def load_cifar10_data():
         transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
     ])
     
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
-    ])
-    
-    # Download and load training data
     train_dataset = datasets.CIFAR10(
-        './data', 
-        train=True, 
-        download=True, 
-        transform=transform_train
+        './data', train=True, download=True, transform=transform_train
     )
     
     test_dataset = datasets.CIFAR10(
-        './data',
-        train=False,
-        download=True,
-        transform=transform_test
+        './data', train=False, download=True, 
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010))
+        ])
     )
-    
-    print(f"CIFAR-10 Classes: {train_dataset.classes}")
     
     return train_dataset, test_dataset
 
 
 def split_dataset(dataset, forget_ratio=0.2, batch_size=2):
-    """
-    Split dataset into forget and retain sets.
-    
-    Args:
-        dataset: Full dataset
-        forget_ratio: Proportion of data to forget (e.g., 0.2 = 20%)
-        batch_size: Batch size for dataloaders
-    
-    Returns:
-        forget_loader, retain_loader
-    """
+    """Split dataset into forget and retain sets."""
     total_size = len(dataset)
     forget_size = int(total_size * forget_ratio)
-    retain_size = total_size - forget_size
     
-    # Random split
     indices = torch.randperm(total_size).tolist()
     forget_indices = indices[:forget_size]
     retain_indices = indices[forget_size:]
@@ -193,17 +128,20 @@ def split_dataset(dataset, forget_ratio=0.2, batch_size=2):
     return forget_loader, retain_loader
 
 
-# ==================== Step 4: Train Base Model ====================
+# ==================== Training ====================
 
-def train_base_model(model, train_loader, config, epochs=5):
-    """Train the base model on full dataset."""
+def train_base_model(model, train_loader, config, epochs=3):
+    """Train base model."""
     model.to(config.device)
     model.train()
     
     optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
     criterion = nn.CrossEntropyLoss()
     
-    print("Training base model...")
+    epoch_losses = []
+    epoch_accuracies = []
+    
+    print(f"Training base model for {epochs} epochs...")
     for epoch in range(epochs):
         total_loss = 0
         correct = 0
@@ -225,216 +163,16 @@ def train_base_model(model, train_loader, config, epochs=5):
         
         accuracy = 100 * correct / total
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")
-    
-    return model
-
-
-# ==================== Step 5: Import and Use Hybrid Unlearning ====================
-
-# NOTE: Assuming the HybridParetoePruningUnlearning class is imported
-# from your_module import HybridParetoePruningUnlearning
-from .pareto_pruning import HybridParetoePruningUnlearning
-
-# # For demonstration, we'll define a minimal version here:
-# class HybridUnlearningDemo:
-#     """Simplified version for demonstration."""
-#     def __init__(self, config, pruning_ratio=0.15, forget_weight=0.5,
-#                  retention_weight=0.5, pareto_steps=10):
-#         self.config = config
-#         self.pruning_ratio = pruning_ratio
-#         self.forget_weight = forget_weight
-#         self.retention_weight = retention_weight
-#         self.pareto_steps = pareto_steps
-    
-#     def unlearn(self, model, forget_data, retain_data):
-#         print("\n=== Starting Hybrid Unlearning ===")
-#         print(f"Pruning Ratio: {self.pruning_ratio}")
-#         print(f"Forget Weight: {self.forget_weight}")
-#         print(f"Retention Weight: {self.retention_weight}")
-#         print(f"Pareto Steps: {self.pareto_steps}")
+        epoch_losses.append(avg_loss)
+        epoch_accuracies.append(accuracy)
         
-#         # This is a placeholder - use the actual implementation
-#         import copy
-#         unlearned_model = copy.deepcopy(model)
-        
-#         print("\nPhase 1: Dynamic Pruning...")
-#         # Actual pruning would happen here
-        
-#         print("Phase 2: Pareto Optimization...")
-#         # Actual optimization would happen here
-        
-#         print("Phase 3: Refinement...")
-#         # Actual refinement would happen here
-        
-#         return unlearned_model
+        print(f"  Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f}, Acc: {accuracy:.2f}%")
     
-#     def evaluate_unlearning(self, model, forget_data, retain_data):
-#         model.eval()
-#         device = self.config.device
-        
-#         # Evaluate forget data
-#         forget_correct = 0
-#         forget_total = 0
-#         with torch.no_grad():
-#             for data, target in forget_data:
-#                 data, target = data.to(device), target.to(device)
-#                 output = model(data)
-#                 pred = output.argmax(dim=1)
-#                 forget_correct += (pred == target).sum().item()
-#                 forget_total += target.size(0)
-        
-#         # Evaluate retain data
-#         retain_correct = 0
-#         retain_total = 0
-#         with torch.no_grad():
-#             for data, target in retain_data:
-#                 data, target = data.to(device), target.to(device)
-#                 output = model(data)
-#                 pred = output.argmax(dim=1)
-#                 retain_correct += (pred == target).sum().item()
-#                 retain_total += target.size(0)
-        
-#         forget_acc = forget_correct / max(forget_total, 1)
-#         retain_acc = retain_correct / max(retain_total, 1)
-        
-#         return {
-#             'forget_accuracy': forget_acc,
-#             'retain_accuracy': retain_acc,
-#             'unlearning_effectiveness': 1.0 - forget_acc,
-#             'retention_preservation': retain_acc
-#         }
-
-
-# ==================== Step 6: Main Execution ====================
-
-def main(use_real_data=False, dataset_type='cifar10'):
-    """Complete workflow for running hybrid unlearning.
-    
-    Args:
-        use_real_data: If True, uses real dataset. If False, uses synthetic data (faster demo)
-        dataset_type: 'mnist' or 'cifar10' when use_real_data=True
-    """
-    
-    # 1. Setup
-    print("=" * 60)
-    print("HYBRID PARETO-PRUNING UNLEARNING DEMO")
-    print("=" * 60)
-    
-    config = FLConfig(
-        device='cuda' if torch.cuda.is_available() else 'cpu',
-        learning_rate=0.001
-    )
-    print(f"\nDevice: {config.device}")
-    
-    # 2. Create dataset and model
-    print("\n--- Creating Dataset ---")
-    if use_real_data:
-        if dataset_type.lower() == 'cifar10':
-            print("Loading CIFAR-10 dataset (color images, will take longer)...")
-            train_dataset, test_dataset = load_cifar10_data()
-            full_dataset = train_dataset
-            model = CIFAR10Net(num_classes=10)
-            print(f"Dataset size: {len(full_dataset)}")
-            print(f"Model type: CNN with {sum(p.numel() for p in model.parameters()):,} parameters")
-            training_epochs = 5  # More epochs for CIFAR-10
-        elif dataset_type.lower() == 'mnist':
-            print("Loading MNIST dataset (grayscale images)...")
-            train_dataset, test_dataset = load_real_mnist_data()
-            full_dataset = train_dataset
-            model = SimpleNN(input_size=784, hidden_size=128, num_classes=10)
-            print(f"Dataset size: {len(full_dataset)}")
-            print(f"Model type: Simple NN with {sum(p.numel() for p in model.parameters()):,} parameters")
-            training_epochs = 5
-        else:
-            raise ValueError(f"Unknown dataset_type: {dataset_type}")
-    else:
-        print("Using synthetic data (quick demo)...")
-        full_dataset = create_synthetic_data(num_samples=1000, input_size=784, num_classes=10)
-        model = SimpleNN(input_size=784, hidden_size=128, num_classes=10)
-        print(f"Dataset size: {len(full_dataset)}")
-        training_epochs = 5
-    
-    full_loader = DataLoader(full_dataset, batch_size=2, shuffle=True)
-    
-    # Split into forget and retain
-    forget_loader, retain_loader = split_dataset(
-        full_dataset, 
-        forget_ratio=0.2,  # 20% of data to forget
-        batch_size=2
-    )
-    print(f"Forget set size: {len(forget_loader.dataset)}")
-    print(f"Retain set size: {len(retain_loader.dataset)}")
-    
-    # 3. Create and train base model
-    print("\n--- Training Base Model ---")
-    model = train_base_model(model, full_loader, config, epochs=training_epochs)
-    
-    # 4. Evaluate base model
-    print("\n--- Base Model Evaluation ---")
-    model.eval()
-    base_forget_acc = evaluate_accuracy(model, forget_loader, config.device)
-    base_retain_acc = evaluate_accuracy(model, retain_loader, config.device)
-    print(f"Base Model - Forget Accuracy: {base_forget_acc*100:.2f}%")
-    print(f"Base Model - Retain Accuracy: {base_retain_acc*100:.2f}%")
-    
-    # 5. Create unlearning strategy
-    print("\n--- Initializing Hybrid Unlearning Strategy ---")
-    
-    # FOR ACTUAL USE, REPLACE WITH:
-    # from your_module import HybridParetoePruningUnlearning
-    # unlearning_strategy = HybridParetoePruningUnlearning(
-    
-    unlearning_strategy = HybridParetoePruningUnlearning(
-        config=config,
-        pruning_ratio=0.15,          # Prune 15% of parameters
-        forget_weight=0.5,            # Initial forget objective weight
-        retention_weight=0.5,         # Initial retention objective weight
-        pareto_steps=10               # Number of Pareto optimization steps
-    )
-    
-    # 6. Perform unlearning
-    print("\n--- Running Unlearning Process ---")
-    unlearned_model = unlearning_strategy.unlearn(
-        model=model,
-        forget_data=forget_loader,
-        retain_data=retain_loader
-    )
-    
-    # 7. Evaluate unlearned model
-    print("\n--- Evaluating Unlearned Model ---")
-    metrics = unlearning_strategy.evaluate_unlearning(
-        model=unlearned_model,
-        forget_data=forget_loader,
-        retain_data=retain_loader
-    )
-    
-    # 8. Display results
-    print("\n" + "=" * 60)
-    print("UNLEARNING RESULTS")
-    print("=" * 60)
-    print(f"\nForget Accuracy (lower is better):")
-    print(f"  Base Model:      {base_forget_acc*100:.2f}%")
-    print(f"  Unlearned Model: {metrics['forget_accuracy']*100:.2f}%")
-    print(f"  Improvement:     {(base_forget_acc - metrics['forget_accuracy'])*100:.2f}%")
-    
-    print(f"\nRetain Accuracy (higher is better):")
-    print(f"  Base Model:      {base_retain_acc*100:.2f}%")
-    print(f"  Unlearned Model: {metrics['retain_accuracy']*100:.2f}%")
-    print(f"  Change:          {(metrics['retain_accuracy'] - base_retain_acc)*100:.2f}%")
-    
-    print(f"\nUnlearning Metrics:")
-    print(f"  Unlearning Effectiveness: {metrics['unlearning_effectiveness']*100:.2f}%")
-    print(f"  Retention Preservation:   {metrics['retention_preservation']*100:.2f}%")
-    
-    # 9. Visualize results
-    visualize_results(base_forget_acc, base_retain_acc, metrics)
-    
-    return unlearned_model, metrics
+    return model, epoch_losses, epoch_accuracies
 
 
 def evaluate_accuracy(model, data_loader, device):
-    """Helper function to evaluate accuracy."""
+    """Evaluate model accuracy."""
     model.eval()
     correct = 0
     total = 0
@@ -450,119 +188,361 @@ def evaluate_accuracy(model, data_loader, device):
     return correct / max(total, 1)
 
 
-def visualize_results(base_forget_acc, base_retain_acc, metrics):
-    """Visualize unlearning results."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+# ==================== Hyperparameter Search ====================
+
+def define_hyperparameter_grid():
+    """
+    Define hyperparameter search grid.
     
-    # Accuracy comparison
-    categories = ['Forget Accuracy\n(lower is better)', 'Retain Accuracy\n(higher is better)']
-    base_values = [base_forget_acc * 100, base_retain_acc * 100]
-    unlearned_values = [metrics['forget_accuracy'] * 100, metrics['retain_accuracy'] * 100]
+    Returns dict with lists of values to search over.
+    """
+    return {
+        # Pruning parameters
+        'pruning_ratio': [0.1, 0.15, 0.2],
+        'importance_threshold': [0.5, 0.6, 0.7],
+        'pruning_iterations': [2, 3],
+        
+        # Pareto parameters
+        'forget_weight': [0.3, 0.5, 0.7],
+        'retention_weight': [0.3, 0.5, 0.7],
+        'pareto_steps': [5, 10, 15],
+        'adaptive_weights': [True, False],
+        
+        # Phase parameters
+        'phase1_epochs': [2, 3],
+        'phase2_epochs': [5, 8],
+        'refinement_epochs': [2, 3],
+        
+        # Training parameters
+        'learning_rate': [0.001, 0.01],
+        'use_gradient_masking': [True, False],
+    }
+
+
+def generate_hyperparameter_combinations(grid, max_combinations=None):
+    """
+    Generate all combinations of hyperparameters.
     
-    x = np.arange(len(categories))
-    width = 0.35
+    Args:
+        grid: Dict of hyperparameter lists
+        max_combinations: If set, randomly sample this many combinations
     
-    axes[0].bar(x - width/2, base_values, width, label='Base Model', alpha=0.8)
-    axes[0].bar(x + width/2, unlearned_values, width, label='Unlearned Model', alpha=0.8)
-    axes[0].set_ylabel('Accuracy (%)')
-    axes[0].set_title('Model Comparison')
-    axes[0].set_xticks(x)
-    axes[0].set_xticklabels(categories)
-    axes[0].legend()
-    axes[0].grid(axis='y', alpha=0.3)
+    Returns:
+        List of hyperparameter dicts
+    """
+    keys = grid.keys()
+    values = grid.values()
     
-    # Unlearning metrics
-    metric_names = ['Unlearning\nEffectiveness', 'Retention\nPreservation']
-    metric_values = [
-        metrics['unlearning_effectiveness'] * 100,
-        metrics['retention_preservation'] * 100
+    # Generate all combinations
+    all_combinations = [dict(zip(keys, v)) for v in product(*values)]
+    
+    print(f"Total possible combinations: {len(all_combinations)}")
+    
+    # Sample if too many
+    if max_combinations and len(all_combinations) > max_combinations:
+        import random
+        all_combinations = random.sample(all_combinations, max_combinations)
+        print(f"Sampling {max_combinations} random combinations")
+    
+    return all_combinations
+
+
+def validate_hyperparameters(params):
+    """Ensure hyperparameters are valid."""
+    # Normalize forget and retention weights to sum to 1
+    total = params['forget_weight'] + params['retention_weight']
+    if total > 0:
+        params['forget_weight'] /= total
+        params['retention_weight'] /= total
+    
+    return params
+
+
+# ==================== Main Training Loop ====================
+
+def run_hyperparameter_search(dataset='cifar10', use_subset=True, 
+                              max_combinations=50, output_dir='./results'):
+    """
+    Run hyperparameter search over the training script.
+    
+    Args:
+        dataset: Dataset to use
+        use_subset: Use subset of data for faster search
+        max_combinations: Maximum number of hyperparameter combinations to try
+        output_dir: Directory to save results
+    """
+    # Setup
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = os.path.join(output_dir, f'hyperparam_search_results_{timestamp}.csv')
+    
+    print("=" * 80)
+    print("HYPERPARAMETER SEARCH FOR HYBRID PARETO-PRUNING UNLEARNING")
+    print("=" * 80)
+    print(f"Dataset: {dataset}")
+    print(f"Epochs: 3 (fixed)")
+    print(f"Batch size: 2 (fixed)")
+    print(f"Results will be saved to: {csv_filename}")
+    print("=" * 80)
+    
+    # Load dataset
+    print("\nLoading dataset...")
+    if dataset == 'cifar10':
+        train_dataset, test_dataset = load_cifar10_data()
+        model_class = CIFAR10Net
+    else:
+        raise ValueError(f"Unknown dataset: {dataset}")
+    
+    # Use subset for faster search
+    if use_subset:
+        subset_size = min(5000, len(train_dataset))
+        indices = torch.randperm(len(train_dataset))[:subset_size].tolist()
+        train_dataset = Subset(train_dataset, indices)
+        print(f"Using subset: {len(train_dataset)} samples")
+    
+    full_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
+    
+    # Generate hyperparameter combinations
+    print("\nGenerating hyperparameter combinations...")
+    hyperparam_grid = define_hyperparameter_grid()
+    hyperparameter_combinations = generate_hyperparameter_combinations(
+        hyperparam_grid, max_combinations=max_combinations
+    )
+    
+    print(f"\nWill test {len(hyperparameter_combinations)} configurations")
+    print("=" * 80)
+    
+    # Initialize CSV file with headers
+    csv_headers = [
+        'run_id', 'timestamp', 'dataset',
+        # Hyperparameters
+        'pruning_ratio', 'importance_threshold', 'pruning_iterations',
+        'forget_weight', 'retention_weight', 'pareto_steps', 'adaptive_weights',
+        'phase1_epochs', 'phase2_epochs', 'refinement_epochs',
+        'learning_rate', 'use_gradient_masking',
+        # Training metrics
+        'base_train_loss', 'base_train_accuracy',
+        'base_forget_accuracy', 'base_retain_accuracy',
+        # Unlearning metrics
+        'unlearned_forget_accuracy', 'unlearned_retain_accuracy',
+        'unlearning_effectiveness', 'retention_preservation',
+        'forget_accuracy_improvement', 'retain_accuracy_change',
+        # Additional metrics
+        'pruned_parameters', 'total_parameters', 'pruning_ratio_actual',
+        'pareto_frontier_size',
+        # Phase metrics
+        'phase1_forget_acc', 'phase1_retain_acc',
+        'phase2_forget_acc', 'phase2_retain_acc',
+        'phase3_forget_acc', 'phase3_retain_acc',
+        # Status
+        'status', 'error_message'
     ]
     
-    colors = ['#ff6b6b', '#51cf66']
-    axes[1].bar(metric_names, metric_values, color=colors, alpha=0.8)
-    axes[1].set_ylabel('Score (%)')
-    axes[1].set_title('Unlearning Quality Metrics')
-    axes[1].set_ylim([0, 100])
-    axes[1].grid(axis='y', alpha=0.3)
+    with open(csv_filename, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=csv_headers)
+        writer.writeheader()
     
-    # Add value labels on bars
-    for i, v in enumerate(metric_values):
-        axes[1].text(i, v + 2, f'{v:.1f}%', ha='center', fontweight='bold')
+    # Run hyperparameter search
+    results = []
     
-    plt.tight_layout()
-    plt.savefig('unlearning_results.png', dpi=150, bbox_inches='tight')
-    print(f"\nVisualization saved as 'unlearning_results.png'")
-    plt.show()
+    for run_id, params in enumerate(hyperparameter_combinations):
+        print(f"\n{'='*80}")
+        print(f"RUN {run_id + 1}/{len(hyperparameter_combinations)}")
+        print(f"{'='*80}")
+        print("Hyperparameters:")
+        for key, value in params.items():
+            print(f"  {key}: {value}")
+        
+        try:
+            # Validate parameters
+            params = validate_hyperparameters(params)
+            
+            # Create fresh model
+            model = model_class()
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            config = FLConfig(device=device, learning_rate=params['learning_rate'])
+            
+            # Train base model
+            print("\n--- Training Base Model ---")
+            model, train_losses, train_accuracies = train_base_model(
+                model, full_loader, config, epochs=3
+            )
+            
+            # Split data
+            forget_loader, retain_loader = split_dataset(train_dataset, batch_size=2)
+            
+            # Evaluate base model
+            print("\n--- Evaluating Base Model ---")
+            base_forget_acc = evaluate_accuracy(model, forget_loader, device)
+            base_retain_acc = evaluate_accuracy(model, retain_loader, device)
+            print(f"Base Forget Accuracy: {base_forget_acc*100:.2f}%")
+            print(f"Base Retain Accuracy: {base_retain_acc*100:.2f}%")
+            
+            # Import unlearning strategy
+            from pareto_pruning import HybridParetoePruningUnlearning
+            
+            # Create unlearning strategy with current hyperparameters
+            print("\n--- Creating Unlearning Strategy ---")
+            unlearning_strategy = HybridParetoePruningUnlearning(
+                config=config,
+                pruning_ratio=params['pruning_ratio'],
+                importance_threshold=params['importance_threshold'],
+                pruning_iterations=params['pruning_iterations'],
+                forget_weight=params['forget_weight'],
+                retention_weight=params['retention_weight'],
+                pareto_steps=params['pareto_steps'],
+                adaptive_weights=params['adaptive_weights'],
+                phase1_epochs=params['phase1_epochs'],
+                phase2_epochs=params['phase2_epochs'],
+                refinement_epochs=params['refinement_epochs'],
+                use_gradient_masking=params['use_gradient_masking']
+            )
+            
+            # Perform unlearning
+            print("\n--- Running Unlearning ---")
+            unlearned_model = unlearning_strategy.unlearn(
+                model=model,
+                forget_data=forget_loader,
+                retain_data=retain_loader
+            )
+            
+            # Evaluate unlearned model
+            print("\n--- Evaluating Unlearned Model ---")
+            metrics = unlearning_strategy.evaluate_unlearning(
+                model=unlearned_model,
+                forget_data=forget_loader,
+                retain_data=retain_loader
+            )
+            
+            # Compile results
+            result = {
+                'run_id': run_id,
+                'timestamp': datetime.now().isoformat(),
+                'dataset': dataset,
+                
+                # Hyperparameters
+                **params,
+                
+                # Training metrics
+                'base_train_loss': train_losses[-1],
+                'base_train_accuracy': train_accuracies[-1],
+                'base_forget_accuracy': base_forget_acc,
+                'base_retain_accuracy': base_retain_acc,
+                
+                # Unlearning metrics
+                'unlearned_forget_accuracy': metrics['forget_accuracy'],
+                'unlearned_retain_accuracy': metrics['retain_accuracy'],
+                'unlearning_effectiveness': metrics['unlearning_effectiveness'],
+                'retention_preservation': metrics['retention_preservation'],
+                'forget_accuracy_improvement': base_forget_acc - metrics['forget_accuracy'],
+                'retain_accuracy_change': metrics['retain_accuracy'] - base_retain_acc,
+                
+                # Additional metrics
+                'pruned_parameters': metrics.get('pruned_parameters', 0),
+                'total_parameters': metrics.get('total_parameters', 0),
+                'pruning_ratio_actual': metrics.get('pruning_ratio', 0),
+                'pareto_frontier_size': metrics.get('pareto_frontier_size', 0),
+                
+                # Phase metrics
+                'phase1_forget_acc': metrics.get('phase1_forget_acc', 0),
+                'phase1_retain_acc': metrics.get('phase1_retain_acc', 0),
+                'phase2_forget_acc': metrics.get('phase2_forget_acc', 0),
+                'phase2_retain_acc': metrics.get('phase2_retain_acc', 0),
+                'phase3_forget_acc': metrics.get('phase3_forget_acc', 0),
+                'phase3_retain_acc': metrics.get('phase3_retain_acc', 0),
+                
+                # Status
+                'status': 'success',
+                'error_message': ''
+            }
+            
+            print("\n--- Results ---")
+            print(f"Forget Accuracy: {base_forget_acc*100:.2f}% → {metrics['forget_accuracy']*100:.2f}%")
+            print(f"Retain Accuracy: {base_retain_acc*100:.2f}% → {metrics['retain_accuracy']*100:.2f}%")
+            print(f"Unlearning Effectiveness: {metrics['unlearning_effectiveness']*100:.2f}%")
+            print(f"Retention Preservation: {metrics['retention_preservation']*100:.2f}%")
+            
+        except Exception as e:
+            print(f"\n❌ ERROR: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            result = {
+                'run_id': run_id,
+                'timestamp': datetime.now().isoformat(),
+                'dataset': dataset,
+                **params,
+                'status': 'failed',
+                'error_message': str(e)
+            }
+        
+        # Save result to CSV
+        results.append(result)
+        with open(csv_filename, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=csv_headers)
+            writer.writerow(result)
+        
+        print(f"✓ Results saved to CSV")
+    
+    # Summary
+    print("\n" + "=" * 80)
+    print("HYPERPARAMETER SEARCH COMPLETE")
+    print("=" * 80)
+    print(f"Total runs: {len(results)}")
+    print(f"Successful: {sum(1 for r in results if r.get('status') == 'success')}")
+    print(f"Failed: {sum(1 for r in results if r.get('status') == 'failed')}")
+    print(f"\nResults saved to: {csv_filename}")
+    
+    # Load results as DataFrame and show best configurations
+    df = pd.read_csv(csv_filename)
+    df_success = df[df['status'] == 'success']
+    
+    if len(df_success) > 0:
+        print("\n" + "=" * 80)
+        print("TOP 5 CONFIGURATIONS BY UNLEARNING EFFECTIVENESS")
+        print("=" * 80)
+        top5 = df_success.nlargest(5, 'unlearning_effectiveness')
+        print(top5[['run_id', 'pruning_ratio', 'forget_weight', 'pareto_steps', 
+                    'unlearning_effectiveness', 'retention_preservation']].to_string(index=False))
+        
+        print("\n" + "=" * 80)
+        print("TOP 5 CONFIGURATIONS BY BALANCED SCORE")
+        print("=" * 80)
+        df_success['balanced_score'] = (
+            0.5 * df_success['unlearning_effectiveness'] + 
+            0.5 * df_success['retention_preservation']
+        )
+        top5_balanced = df_success.nlargest(5, 'balanced_score')
+        print(top5_balanced[['run_id', 'pruning_ratio', 'forget_weight', 'pareto_steps',
+                            'balanced_score']].to_string(index=False))
+    
+    return csv_filename, results
 
 
-# ==================== Step 7: Advanced Usage Examples ====================
-
-def advanced_example():
-    """Advanced usage with custom configurations."""
-    
-    print("\n" + "=" * 60)
-    print("ADVANCED USAGE EXAMPLE")
-    print("=" * 60)
-    
-    config = FLConfig()
-    
-    # Example 1: Aggressive unlearning (prioritize forgetting)
-    print("\n--- Example 1: Aggressive Unlearning ---")
-    aggressive_strategy = HybridParetoePruningUnlearning(
-        config=config,
-        pruning_ratio=0.25,       # More aggressive pruning
-        forget_weight=0.7,        # Prioritize forgetting
-        retention_weight=0.3,
-        pareto_steps=15
-    )
-    
-    # Example 2: Conservative unlearning (prioritize retention)
-    print("\n--- Example 2: Conservative Unlearning ---")
-    conservative_strategy = HybridParetoePruningUnlearning(
-        config=config,
-        pruning_ratio=0.1,        # Less aggressive pruning
-        forget_weight=0.3,        # Prioritize retention
-        retention_weight=0.7,
-        pareto_steps=20
-    )
-    
-    # Example 3: Balanced unlearning
-    print("\n--- Example 3: Balanced Unlearning ---")
-    balanced_strategy = HybridParetoePruningUnlearning(
-        config=config,
-        pruning_ratio=0.15,       # Moderate pruning
-        forget_weight=0.5,        # Equal weights
-        retention_weight=0.5,
-        pareto_steps=15
-    )
-    
-    print("\nStrategies configured successfully!")
-    print("\nTip: Choose strategy based on your priorities:")
-    print("  - Aggressive: When forgetting is critical (e.g., privacy)")
-    print("  - Conservative: When model performance must be maintained")
-    print("  - Balanced: For general use cases")
-
-
-# ==================== Run the Demo ====================
+# ==================== Main Entry Point ====================
 
 if __name__ == "__main__":
-    # Choose your dataset:
+    import argparse
     
-    # Option 1: Quick demo with synthetic data (10 seconds)
-    # print("Running QUICK DEMO with synthetic data...\n")
-    # unlearned_model, metrics = main(use_real_data=False)
+    parser = argparse.ArgumentParser(description='Hyperparameter search training script')
+    parser.add_argument('--dataset', type=str, default='cifar10', 
+                       choices=['cifar10', 'mnist'],
+                       help='Dataset to use')
+    parser.add_argument('--use-subset', action='store_true', default=True,
+                       help='Use subset of data')
+    parser.add_argument('--max-combinations', type=int, default=50,
+                       help='Maximum number of hyperparameter combinations')
+    parser.add_argument('--output-dir', type=str, default='./results',
+                       help='Output directory for results')
     
-    # Option 2: Realistic demo with CIFAR-10 (10-15 minutes)
-    print("Running REALISTIC DEMO with CIFAR-10 dataset...\n")
-    unlearned_model, metrics = main(use_real_data=True, dataset_type='cifar10')
+    args = parser.parse_args()
     
-    # Option 3: Realistic demo with MNIST (5-7 minutes)
-    # print("Running REALISTIC DEMO with MNIST dataset...\n")
-    # unlearned_model, metrics = main(use_real_data=True, dataset_type='mnist')
+    # Run search
+    csv_file, results = run_hyperparameter_search(
+        dataset=args.dataset,
+        use_subset=args.use_subset,
+        max_combinations=args.max_combinations,
+        output_dir=args.output_dir
+    )
     
-    # Run advanced examples
-    # advanced_example()
-    
-    print("\n" + "=" * 60)
-    print("Demo completed successfully!")
-    print("=" * 60)
+    print(f"\n✓ Complete! Results saved to: {csv_file}")
