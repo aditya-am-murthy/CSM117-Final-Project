@@ -1,0 +1,3 @@
+run_id,timestamp,pruning_ratio,importance_threshold,pruning_iterations,forget_weight,retention_weight,pareto_steps,adaptive_weights,phase1_epochs,phase2_epochs,refinement_epochs,learning_rate,use_gradient_masking,base_forget_accuracy,base_retain_accuracy,unlearned_forget_accuracy,unlearned_retain_accuracy,unlearning_effectiveness,retention_preservation,forget_accuracy_drop,retain_accuracy_change,pruned_parameters,total_parameters,pruning_ratio_actual,pareto_frontier_size,status,error_message
+0,2025-11-30T23:50:59.334077,,,,,,,,,,,,,,,,,,,,,,,,,failed,'NoneType' object has no attribute 'backward'
+1,2025-11-30T23:51:09.413784,,,,,,,,,,,,,,,,,,,,,,,,,failed,'NoneType' object has no attribute 'backward'
