@@ -5,7 +5,8 @@ This module combines dynamic pruning and Pareto optimization to achieve
 optimal unlearning. It first identifies and prunes forget-sensitive parameters,
 then applies multi-objective optimization on the pruned model.
 """
-
+import os
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -14,7 +15,7 @@ from typing import Dict, List, Any, Optional, Tuple
 import copy
 import numpy as np
 from collections import defaultdict
-
+from transformers import ViTModel, ViTConfig
 from src.fl.base import UnlearningStrategy, FLConfig
 
 class HybridParetoePruningUnlearning(UnlearningStrategy):
@@ -80,49 +81,55 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
             'phase1': {}, 'phase2': {}, 'phase3': {}
         }
     
+    @staticmethod
+    def load_vit_base():
+        """Load google/vit-base-patch16-224 with classification head."""
+        from transformers import ViTForImageClassification
+        model = ViTForImageClassification.from_pretrained(
+            "google/vit-base-patch16-224",
+            num_labels=10,
+            ignore_mismatched_sizes=True  # Allows loading even if head differs
+        )
+        return model
+    
     # ==================== Phase 1: Dynamic Pruning ====================
     
-    def _compute_parameter_importance(self, model: nn.Module, 
-                                     forget_loader: DataLoader) -> Dict[str, torch.Tensor]:
-        """
-        Compute gradient-based importance scores for each parameter.
-        
-        Uses accumulated gradient magnitudes on forget data as proxy for
-        parameter importance in encoding forget information.
-        """
-        model.eval()
+
+    def _compute_parameter_importance(self, model: nn.Module, forget_loader: DataLoader) -> Dict[str, torch.Tensor]:
+        """Compute gradient-based importance scores using forget data."""
+        model.train()   # <--- THIS WAS MISSING! ViT returns loss=None in eval mode
         importance_scores = {}
-        
-        # Initialize importance scores
         for name, param in model.named_parameters():
             if param.requires_grad:
                 importance_scores[name] = torch.zeros_like(param)
-        
+
         criterion = nn.CrossEntropyLoss()
-        num_batches = 0
-        
+
         for data, target in forget_loader:
             data = data.to(self.config.device)
             target = target.to(self.config.device)
-            
+
             model.zero_grad()
-            output = model(data)
-            loss = criterion(output, target)
+            outputs = model(data, labels=target)   # <--- PASS labels= to get loss!
+            loss = outputs.loss                     # <--- now it's not None
+
+            if loss is None or not torch.isfinite(loss):
+                continue
+
             loss.backward()
-            
-            # Accumulate gradient magnitudes
+
             for name, param in model.named_parameters():
                 if param.requires_grad and param.grad is not None:
                     importance_scores[name] += torch.abs(param.grad)
-            
-            num_batches += 1
-        
-        # Normalize by number of batches
+
+        # Average over batches
+        num_batches = len(forget_loader)
         for name in importance_scores:
             importance_scores[name] /= max(num_batches, 1)
-        
+
+        model.eval()  # restore eval mode
         return importance_scores
-    
+
     def _create_adaptive_pruning_mask(self, importance_scores: Dict[str, torch.Tensor],
                                      iteration: int) -> Dict[str, torch.Tensor]:
         """
@@ -205,29 +212,37 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
         self.phase_metrics['phase1'] = self._evaluate_phase(model, forget_loader, retain_loader)
     
     def _constrained_fine_tune(self, model: nn.Module, retain_loader: DataLoader,
-                              epochs: int = 2, lr_factor: float = 0.1):
+                           epochs: int = 2, lr_factor: float = 0.1):
         """Fine-tune with gradient masking to respect pruning structure."""
         model.train()
-        optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate * lr_factor)
+        optimizer = optim.AdamW(model.parameters(), lr=self.config.learning_rate * lr_factor)
         criterion = nn.CrossEntropyLoss()
-        
+
         for epoch in range(epochs):
             for data, target in retain_loader:
                 data = data.to(self.config.device)
                 target = target.to(self.config.device)
-                
+
                 optimizer.zero_grad()
-                output = model(data)
-                loss = criterion(output, target)
+
+                # CRITICAL: Use labels= to get proper loss, OR extract logits
+                outputs = model(data, labels=target)        # Preferred way
+                if outputs.loss is not None:
+                    loss = outputs.loss
+                else:
+                    # Fallback if labels not passed
+                    logits = outputs.logits if hasattr(outputs, 'logits') else outputs
+                    loss = criterion(logits, target)
+
                 loss.backward()
-                
-                # Apply gradient masking
-                if self.use_gradient_masking:
+
+                # Apply gradient masking if enabled
+                if self.use_gradient_masking and self.pruning_mask:
                     for name, param in model.named_parameters():
                         if name in self.pruning_mask and param.grad is not None:
                             mask = self.pruning_mask[name].to(param.device)
-                            param.grad *= mask
-                
+                            param.grad.data *= mask
+
                 optimizer.step()
     
     # ==================== Phase 2: Pareto Optimization ====================
@@ -237,16 +252,20 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
         return data.to(self.config.device), target.to(self.config.device)
 
     def _compute_multi_objective_loss(self, model: nn.Module,
-                                    forget_loader: DataLoader,
-                                    retain_loader: DataLoader):
+                                  forget_loader: DataLoader,
+                                  retain_loader: DataLoader):
         model.train()
         criterion = nn.CrossEntropyLoss()
 
         f_data, f_target = self._sample_batch(forget_loader)
         r_data, r_target = self._sample_batch(retain_loader)
 
-        forget_loss = criterion(model(f_data), f_target)
-        retain_loss = criterion(model(r_data), r_target)
+        # Forward with labels
+        f_outputs = model(f_data, labels=f_target)
+        r_outputs = model(r_data, labels=r_target)
+
+        forget_loss = f_outputs.loss
+        retain_loss = r_outputs.loss
 
         total_loss = -self.current_weights[0] * forget_loss + self.current_weights[1] * retain_loss
 
@@ -326,32 +345,29 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
     # ==================== Phase 3: Refinement ====================
     
     def _phase3_refinement(self, model: nn.Module,
-                           forget_loader: DataLoader,
-                           retain_loader: DataLoader):
-        """Phase 3: Final refinement with balanced objectives."""
-        optimizer = optim.Adam(model.parameters(), lr=self.config.learning_rate * 0.05)
+                       forget_loader: DataLoader,
+                       retain_loader: DataLoader):
+        optimizer = optim.AdamW(model.parameters(), lr=self.config.learning_rate * 0.05)
+        criterion = nn.CrossEntropyLoss()
 
-        # Use the last recorded Pareto point, or fall back to initial weights
         if self.pareto_frontier:
             optimal_point = self._find_pareto_optimal_solution()
-            if optimal_point:  # could still be {} if all points were bad
+            if optimal_point:
                 self.current_weights = (
                     optimal_point.get('forget_weight', self.forget_weight),
                     optimal_point.get('retention_weight', self.retention_weight)
                 )
 
-        # If still no frontier (e.g. we skipped too many evals), just use 0.5/0.5
-        if sum(self.current_weights) == 0:
-            self.current_weights = (0.5, 0.5)
-
-        print(f"Phase 3 using weights: forget={self.current_weights[0]:.3f}, retain={self.current_weights[1]:.3f}")
-
-        criterion = nn.CrossEntropyLoss()
         for epoch in range(self.refinement_epochs):
-            total_loss, _ = self._compute_multi_objective_loss(
-                model, forget_loader, retain_loader
-            )
+            f_data, f_target = self._sample_batch(forget_loader)
+            r_data, r_target = self._sample_batch(retain_loader)
+
             optimizer.zero_grad()
+
+            f_out = model(f_data, labels=f_target)
+            r_out = model(r_data, labels=r_target)
+
+            total_loss = -self.current_weights[0] * f_out.loss + self.current_weights[1] * r_out.loss
             total_loss.backward()
 
             if self.use_gradient_masking and self.pruning_mask:
@@ -376,7 +392,11 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
                 data = data.to(self.config.device)
                 target = target.to(self.config.device)
                 output = model(data)
-                pred = output.argmax(dim=1)
+                if hasattr(output, 'logits'):
+                    logits = output.logits
+                else:
+                    logits = output
+                pred = logits.argmax(dim=1)
                 correct += (pred == target).sum().item()
                 total += target.size(0)
         
@@ -423,41 +443,25 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
     
     # ==================== Main Unlearning Method ====================
     
-    def unlearn(self, model: nn.Module, forget_data: DataLoader,
-                retain_data: DataLoader) -> nn.Module:
-        """
-        Perform hybrid Pareto-pruning unlearning.
-        
-        Pipeline:
-        1. Phase 1: Dynamic pruning to isolate forget regions
-        2. Phase 2: Pareto optimization for optimal trade-offs
-        3. Phase 3: Refinement with balanced objectives
-        """
+    def unlearn(self, model: nn.Module, forget_data: DataLoader, retain_data: DataLoader) -> nn.Module:
         torch.cuda.empty_cache()
-        print(f"GPU memory before unlearning: {torch.cuda.memory_allocated()/1e9:.2f} GB")
-
-        # Reduce batch size to 32–64 if still OOM
-        # forget_data.batch_size = 16
-        # retain_data.batch_size = 16
-
         unlearned_model = copy.deepcopy(model)
         unlearned_model.to(self.config.device)
-        
-        # Reset state
+
         self.pruning_mask = {}
         self.importance_scores = {}
         self.pareto_frontier = []
         self.current_weights = (self.forget_weight, self.retention_weight)
-        
+
         print("Phase 1: Dynamic Pruning...")
         self._phase1_dynamic_pruning(unlearned_model, forget_data, retain_data)
-        
+
         print("Phase 2: Pareto Optimization...")
         self._phase2_pareto_optimization(unlearned_model, forget_data, retain_data)
-        
+
         print("Phase 3: Refinement...")
         self._phase3_refinement(unlearned_model, forget_data, retain_data)
-        
+
         return unlearned_model
     
     def evaluate_unlearning(self, model: nn.Module, forget_data: DataLoader,
@@ -477,10 +481,12 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
                 data = data.to(device)
                 target = target.to(device)
                 output = model(data)
-                loss = criterion(output, target)
+                logits = output.logits
+                loss = criterion(logits, target)
                 forget_loss += loss.item()
                 
-                pred = output.argmax(dim=1)
+                # logits = output.logits if hasattr(output, 'logits') else output
+                pred = logits.argmax(dim=1)
                 forget_correct += (pred == target).sum().item()
                 forget_total += target.size(0)
         
@@ -494,10 +500,12 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
                 data = data.to(device)
                 target = target.to(device)
                 output = model(data)
-                loss = criterion(output, target)
+                logits = output.logits
+                loss = criterion(logits, target)
                 retain_loss += loss.item()
                 
-                pred = output.argmax(dim=1)
+                # logits = output.logits if hasattr(output, 'logits') else output
+                pred = logits.argmax(dim=1)
                 retain_correct += (pred == target).sum().item()
                 retain_total += target.size(0)
         
@@ -549,3 +557,8 @@ class HybridParetoePruningUnlearning(UnlearningStrategy):
                 self.phase_metrics['phase3'].get('retention_preservation', 0) - 
                 self.phase_metrics['phase1'].get('retention_preservation', 0)
         }
+
+
+
+
+
